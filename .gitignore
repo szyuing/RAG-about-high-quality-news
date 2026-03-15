@@ -1,0 +1,63 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# =========================
+# Logs / Cache
+# =========================
+*.log
+.cache/
+.pytest_cache/
+.mypy_cache/
+ruff_cache/
+
+# =========================
+# Data / Artifacts (RAG 常见)
+# =========================
+data_raw/
+data_private/
+datasets/
+downloads/
+outputs/
+artifacts/
+
+# Vector DB / Local indices (Chroma/FAISS 等常见本地目录)
+chroma/
+chromadb/
+faiss_index/
+indexes/
+storage/
+
+# =========================
+# Secrets (一定不要上传)
+# =========================
+.env
+.env.*
+*.pem
+*.key
+*secret*
+*apikey*
