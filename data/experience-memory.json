@@ -1,0 +1,86 @@
+[
+  {
+    "created_at": "2026-03-15T13:16:46.100Z",
+    "question": "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
+    "useful_queries": [
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？ 官方",
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？ 评测 视频",
+      "Sora current duration official update"
+    ],
+    "useful_source_types": [
+      "web",
+      "video",
+      "forum",
+      "document"
+    ],
+    "note": "该问题可通过 web + document + video 组合完成首轮闭环。"
+  },
+  {
+    "created_at": "2026-03-15T13:16:17.009Z",
+    "question": "苹果 2024 年发布的手机比 2023 年的在性能上提升了多少？",
+    "useful_queries": [
+      "苹果 2024 年发布的手机比 2023 年的在性能上提升了多少？",
+      "苹果 2024 年发布的手机比 2023 年的在性能上提升了多少？ 官方",
+      "苹果 2024 年发布的手机比 2023 年的在性能上提升了多少？ 评测 视频",
+      "iPhone 16 vs iPhone 15 benchmark"
+    ],
+    "useful_source_types": [
+      "video",
+      "web",
+      "forum"
+    ],
+    "note": "该问题可通过 web + document + video 组合完成首轮闭环。"
+  },
+  {
+    "created_at": "2026-03-15T13:16:17.001Z",
+    "question": "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
+    "useful_queries": [
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？ 官方",
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？ 评测 视频",
+      "Sora current duration official update"
+    ],
+    "useful_source_types": [
+      "web",
+      "video",
+      "forum",
+      "document"
+    ],
+    "note": "该问题可通过 web + document + video 组合完成首轮闭环。"
+  },
+  {
+    "created_at": "2026-03-15T13:16:16.991Z",
+    "question": "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
+    "useful_queries": [
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？ 官方",
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？ 评测 视频",
+      "Sora current duration official update"
+    ],
+    "useful_source_types": [
+      "web",
+      "video",
+      "forum",
+      "document"
+    ],
+    "note": "该问题可通过 web + document + video 组合完成首轮闭环。"
+  },
+  {
+    "created_at": "2026-03-15T13:15:41.700Z",
+    "question": "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
+    "useful_queries": [
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？ 官方",
+      "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？ 评测 视频",
+      "Sora current duration official update"
+    ],
+    "useful_source_types": [
+      "web",
+      "video",
+      "forum",
+      "document"
+    ],
+    "note": "该问题在当前语料内仍有缺口，真实接入时应补官方来源或更强核验。"
+  }
+]

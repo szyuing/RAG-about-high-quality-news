@@ -1,0 +1,10 @@
+{
+  "name": "deep-web-search-mvp",
+  "version": "0.1.0",
+  "description": "Deep Web Search MVP research console",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test --test-isolation=none"
+  }
+}

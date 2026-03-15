@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Deep Web Search MVP</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="page-glow page-glow-left"></div>
+    <div class="page-glow page-glow-right"></div>
+    <main class="shell">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Deep Web Search MVP</p>
+          <h1>先规划，再搜索，再组织证据。</h1>
+          <p class="hero-text">
+            第一版产品聚焦 MVP 主链路：Supervisor 规划任务，Web Researcher 收集候选，
+            Deep Analyst 与 Multimedia 提取证据，Evaluator 决定是否继续，Synthesizer 输出研究摘要。
+          </p>
+        </div>
+        <div class="hero-card">
+          <div class="metric">
+            <span>当前能力</span>
+            <strong>Planner / Search / Read / Video / Verify</strong>
+          </div>
+          <div class="metric">
+            <span>运行方式</span>
+            <strong>本地演示语料 + 可扩展接入层</strong>
+          </div>
+          <div class="metric">
+            <span>输出模式</span>
+            <strong>Quick Answer / Deep Research Summary</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="panel input-panel">
+          <div class="panel-header">
+            <h2>研究控制台</h2>
+            <span id="healthBadge" class="badge">等待启动</span>
+          </div>
+          <label class="field">
+            <span>研究问题</span>
+            <textarea id="questionInput" rows="6" placeholder="输入一个研究问题，例如：Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？"></textarea>
+          </label>
+          <div class="controls">
+            <label class="mode-toggle">
+              <input type="radio" name="mode" value="deep" checked>
+              <span>Deep Research Summary</span>
+            </label>
+            <label class="mode-toggle">
+              <input type="radio" name="mode" value="quick">
+              <span>Quick Answer</span>
+            </label>
+          </div>
+          <div class="actions">
+            <button id="runButton" class="primary-button">运行研究流程</button>
+            <button id="resetButton" class="ghost-button">清空结果</button>
+          </div>
+          <div class="sample-block">
+            <div class="sample-header">
+              <h3>示例问题</h3>
+              <p>点击填充后可直接运行。</p>
+            </div>
+            <div id="sampleList" class="sample-list"></div>
+          </div>
+        </div>
+
+        <div class="panel result-panel">
+          <div class="result-scroll">
+            <section class="result-section">
+              <div class="section-header">
+                <h3>最终回答</h3>
+                <span id="confidenceBadge" class="badge badge-muted">未运行</span>
+              </div>
+              <article id="finalAnswer" class="answer-card empty-state">运行后在这里展示证据化回答。</article>
+            </section>
+
+            <section class="result-section two-column">
+              <article class="sub-panel">
+                <div class="section-header">
+                  <h3>Planner</h3>
+                </div>
+                <pre id="planOutput" class="json-view">等待输出...</pre>
+              </article>
+              <article class="sub-panel">
+                <div class="section-header">
+                  <h3>Evaluator</h3>
+                </div>
+                <pre id="evaluationOutput" class="json-view">等待输出...</pre>
+              </article>
+            </section>
+
+            <section class="result-section">
+              <div class="section-header">
+                <h3>研究轮次</h3>
+              </div>
+              <div id="roundsOutput" class="timeline empty-state">运行后展示多 Agent 闭环。</div>
+            </section>
+
+            <section class="result-section two-column">
+              <article class="sub-panel">
+                <div class="section-header">
+                  <h3>候选来源</h3>
+                </div>
+                <div id="candidateOutput" class="card-list empty-state">等待候选结果...</div>
+              </article>
+              <article class="sub-panel">
+                <div class="section-header">
+                  <h3>深读与多媒体提取</h3>
+                </div>
+                <div id="readOutput" class="card-list empty-state">等待正文与转写结果...</div>
+              </article>
+            </section>
+
+            <section class="result-section">
+              <div class="section-header">
+                <h3>Experience Memory</h3>
+              </div>
+              <div id="memoryOutput" class="memory-grid empty-state">等待历史经验...</div>
+            </section>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+  </html>
