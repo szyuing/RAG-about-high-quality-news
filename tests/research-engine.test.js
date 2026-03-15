@@ -1,27 +1,40 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { runResearch } = require("../src/research-engine");
+const { __internal } = require("../src/source-connectors");
 
-test("research workflow returns planner, rounds and final answer", () => {
-  const result = runResearch({
-    question: "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
-    mode: "deep"
-  });
+test("parseBingSearchMarkdown should extract title and decoded url", () => {
+  const markdown = `
+Title: Demo
 
-  assert.ok(result.plan);
-  assert.ok(result.rounds.length >= 1);
-  assert.ok(result.candidates.length >= 1);
-  assert.ok(result.reads.length >= 1);
-  assert.equal(typeof result.final_answer.quick_answer, "string");
-  assert.ok(result.final_answer.deep_research_summary.evidence_chain.length >= 1);
+URL Source: http://www.bing.com/search?q=Sora+OpenAI
+
+Markdown Content:
+1.   [Sora: Creating video from text | OpenAI](https://www.bing.com/ck/a?!&&p=test&u=a1aHR0cHM6Ly9vcGVuYWkuY29tL2luZGV4L3NvcmEv&ntb=1)
+--------------------------------------------------------------------------------
+
+Feb 15, 2024· Sora is able to generate complex scenes with multiple characters.
+`;
+
+  const results = __internal.parseBingSearchMarkdown(markdown, "Sora OpenAI");
+  assert.equal(results.length, 1);
+  assert.equal(results[0].title, "Sora: Creating video from text | OpenAI");
+  assert.equal(results[0].url, "https://openai.com/index/sora/");
 });
 
-test("comparison query should trigger multiple sub questions", () => {
-  const result = runResearch({
-    question: "苹果 2024 年发布的手机比 2023 年的在性能上提升了多少？",
-    mode: "quick"
-  });
+test("parseTedSearchHtml should extract TED talk candidates", () => {
+  const html = `
+  <article class='m1 search__result'>
+    <h3 class='h7 m4'>
+      <a class="ga-link" data-ga-context="search" href="/talks/victor_riparbelli_will_ai_make_us_the_last_generation_to_read_and_write">Victor Riparbelli: Will AI make us the last generation to read and write?</a>
+    </h3>
+    <div class='search__result__description m4'>
+      Technology is changing our world and how we communicate.
+    </div>
+  </article>
+  `;
 
-  assert.ok(result.plan.sub_questions.length >= 3);
-  assert.ok(result.final_answer.quick_answer.includes("苹果 2024 年发布的手机比 2023 年的在性能上提升了多少"));
+  const results = __internal.parseTedSearchHtml(html, "artificial intelligence");
+  assert.equal(results.length, 1);
+  assert.equal(results[0].platform, "TED");
+  assert.match(results[0].url, /ted\.com\/talks/);
 });

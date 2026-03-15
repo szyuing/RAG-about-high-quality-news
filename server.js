@@ -1,7 +1,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const { runResearch, getSamples, getExperienceMemory } = require("./src/research-engine");
+const { runResearch, getSamples, getExperienceMemory, getSourceCapabilities } = require("./src/research-engine");
 
 const publicDir = path.join(__dirname, "public");
 const port = process.env.PORT || 3000;
@@ -57,7 +57,8 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/api/samples") {
     sendJson(res, 200, {
       prompts: getSamples(),
-      experience_memory: getExperienceMemory()
+      experience_memory: getExperienceMemory(),
+      source_capabilities: getSourceCapabilities()
     });
     return;
   }
@@ -74,7 +75,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const result = runResearch({ question, mode });
+      const result = await runResearch({ question, mode });
       sendJson(res, 200, result);
     } catch (error) {
       sendJson(res, 500, {

@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { sources, samplePrompts } = require("./source-pack");
+const { samplePrompts, sourceCatalog, searchRealSources, readCandidate, __internal } = require("./source-connectors");
 
 const experiencePath = path.join(__dirname, "..", "data", "experience-memory.json");
 
@@ -13,21 +13,11 @@ function normalizeText(value) {
 }
 
 function tokenize(value) {
-  const normalized = normalizeText(value);
-  return Array.from(new Set(normalized.split(" ").filter((token) => token.length > 1)));
+  return Array.from(new Set(normalizeText(value).split(" ").filter((token) => token.length > 1)));
 }
 
-function buildSearchBlob(source) {
-  return normalizeText([
-    source.title,
-    source.summary,
-    source.platform,
-    source.author,
-    ...(source.tags || []),
-    source.content?.markdown || "",
-    ...(source.content?.keyPoints || []),
-    ...((source.transcript || []).map((entry) => entry.text))
-  ].join(" "));
+function buildIntentTokens(question) {
+  return __internal.buildQueryTokens(question);
 }
 
 function dedupeBy(items, getKey) {
@@ -43,16 +33,12 @@ function dedupeBy(items, getKey) {
 }
 
 function average(values) {
-  if (!values.length) {
-    return 0;
-  }
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
 }
 
 function readExperienceMemory() {
   try {
-    const raw = fs.readFileSync(experiencePath, "utf8");
-    return JSON.parse(raw);
+    return JSON.parse(fs.readFileSync(experiencePath, "utf8"));
   } catch (error) {
     return [];
   }
@@ -70,158 +56,86 @@ function getExperienceMemory() {
   return readExperienceMemory().slice(0, 8);
 }
 
-function planner(question) {
-  const lower = question.toLowerCase();
-  const subQuestions = [];
-  const requiredEvidence = [];
+function getSourceCapabilities() {
+  return sourceCatalog;
+}
 
-  if (/(相比|对比|差异|提升|update|更新|versus|vs)/i.test(question)) {
-    subQuestions.push("当前状态或最新版本是什么");
-    subQuestions.push("历史基线或对照版本是什么");
-    subQuestions.push("两者差异体现在哪些指标或能力上");
-  } else {
-    subQuestions.push("核心问题的直接答案是什么");
-    subQuestions.push("哪些证据可以支撑这个答案");
+function buildEnglishQueryHints(question) {
+  const hints = [];
+  if (/sora/i.test(question)) {
+    hints.push("OpenAI Sora current update");
+    hints.push("OpenAI Sora official");
+    hints.push("OpenAI Sora launch difference");
   }
+  if (/苹果|iphone|apple/i.test(question)) {
+    hints.push("Apple iPhone 16 performance benchmark");
+    hints.push("Apple iPhone 16 vs iPhone 15 official");
+    hints.push("iPhone 16 performance review");
+  }
+  if (/为什么|原理|设计|workflow|planner|搜索/i.test(question)) {
+    hints.push("planner first search workflow");
+    hints.push("evidence based search workflow");
+  }
+  if (/论文|paper|research|研究/i.test(question)) {
+    hints.push("research paper");
+  }
+  if (/视频|访谈|演讲|发布会|talk|video/i.test(question)) {
+    hints.push("video talk interview");
+  }
+  return hints;
+}
 
-  if (/(视频|访谈|发布会|youtube|b站|bilibili)/i.test(question) || /(sora|iphone|发布)/i.test(question)) {
+function buildSeedQueries(question) {
+  const hints = buildEnglishQueryHints(question);
+  if (hints.length) {
+    return Array.from(new Set(hints)).slice(0, 4);
+  }
+  return [question];
+}
+
+function planner(question) {
+  const comparisonQuery = /(相比|对比|差异|提升|versus|vs|update|更新)/i.test(question);
+  const whyQuery = /(为什么|why|how)/i.test(question);
+
+  const subQuestions = comparisonQuery
+    ? [
+        "当前版本或当前状态是什么",
+        "历史基线或对照版本是什么",
+        "两者差异体现在哪些指标、能力或工作流上"
+      ]
+    : [
+        "核心问题的直接答案是什么",
+        "哪些证据足以支撑这个答案"
+      ];
+
+  const requiredEvidence = [
+    "通用网页或官方页面",
+    "结构化长文或文档来源"
+  ];
+
+  if (/视频|访谈|演讲|发布会|talk|video|sora|iphone/i.test(question)) {
     requiredEvidence.push("视频或多媒体转写");
   }
-  requiredEvidence.push("官方或高权威网页");
-  requiredEvidence.push("结构化事实或关键数字");
-
-  if (/(为什么|how|why)/i.test(question)) {
-    requiredEvidence.push("设计说明或长文分析");
+  if (whyQuery) {
+    requiredEvidence.push("讨论或社区来源");
   }
 
-  const sourcePriority = [
-    { source_type: "web", reason: "优先拿官方和高权威来源确认主事实" },
-    { source_type: "document", reason: "补充长文、报告和正式说明" },
-    { source_type: "video", reason: "补充发布会、评测、访谈等多媒体证据" },
-    { source_type: "forum", reason: "只用于发现冲突和边缘线索，不作为主结论基础" }
-  ];
-
-  const baseQueries = [
-    question,
-    `${question} 官方`,
-    `${question} 评测 视频`
-  ];
-
-  if (lower.includes("sora")) {
-    baseQueries.push("Sora current duration official update");
-  }
-  if (lower.includes("苹果") || lower.includes("iphone") || lower.includes("apple")) {
-    baseQueries.push("iPhone 16 vs iPhone 15 benchmark");
-  }
-  if (lower.includes("规划") || lower.includes("搜索")) {
-    baseQueries.push("planner first search workflow");
-  }
+  const initialQueries = buildSeedQueries(question);
 
   return {
     task_goal: question,
-    sub_questions: Array.from(new Set(subQuestions)),
-    required_evidence: Array.from(new Set(requiredEvidence)),
-    source_priority: sourcePriority,
-    initial_queries: Array.from(new Set(baseQueries)).slice(0, 4),
-    stop_condition: "至少覆盖 2 类来源、回答全部子问题、关键冲突已有解释或降级处理。"
+    sub_questions: subQuestions,
+    required_evidence: requiredEvidence,
+    source_priority: [
+      { source_type: "web", reason: "优先找官方页、新闻页和权威长文。" },
+      { source_type: "document", reason: "补充论文、研究摘要和结构化背景资料。" },
+      { source_type: "video", reason: "补充 Talk、演讲或视频里的原始表述。" },
+      { source_type: "forum", reason: "用讨论型来源发现争议点和补充视角。" }
+    ],
+    source_capabilities: sourceCatalog,
+    initial_queries: initialQueries,
+    stop_condition: "至少覆盖两类来源，并且核心子问题已经有证据支撑；若仍有冲突，需要明确标注不确定性。"
   };
-}
-
-function toCandidateCard(source, score, query) {
-  return {
-    id: source.id,
-    title: source.title,
-    url: source.url,
-    platform: source.platform,
-    source_type: source.sourceType,
-    author: source.author,
-    published_at: source.publishedAt,
-    duration: source.duration,
-    engagement: source.engagement,
-    authority_score: source.authorityScore,
-    summary: source.summary,
-    matched_query: query,
-    score: Number(score.toFixed(4))
-  };
-}
-
-function enhancedSearch(query) {
-  const tokens = tokenize(query);
-  const results = [];
-
-  for (const source of sources) {
-    const blob = buildSearchBlob(source);
-    let tokenHits = 0;
-    let weightedHits = 0;
-
-    for (const token of tokens) {
-      if (blob.includes(token)) {
-        tokenHits += 1;
-        weightedHits += token.length >= 5 ? 1.2 : 1;
-      }
-    }
-
-    if (!tokens.length || tokenHits === 0) {
-      continue;
-    }
-
-    const relevance = weightedHits / tokens.length;
-    const freshnessBias = source.publishedAt >= "2025-01-01" ? 0.08 : 0;
-    const score = relevance * 0.72 + source.authorityScore * 0.2 + freshnessBias;
-    results.push(toCandidateCard(source, score, query));
-  }
-
-  return dedupeBy(results, (item) => item.url)
-    .sort((left, right) => right.score - left.score)
-    .slice(0, 8);
-}
-
-function deepReadPage(sourceId) {
-  const source = sources.find((item) => item.id === sourceId);
-  if (!source || !source.content) {
-    return null;
-  }
-
-  return {
-    source_id: source.id,
-    tool: "deep_read_page",
-    title: source.title,
-    url: source.url,
-    author: source.author,
-    published_at: source.publishedAt,
-    markdown: source.content.markdown,
-    key_points: source.content.keyPoints,
-    sections: source.content.sections,
-    facts: source.facts || []
-  };
-}
-
-function extractVideoIntel(sourceId) {
-  const source = sources.find((item) => item.id === sourceId);
-  if (!source || !source.transcript) {
-    return null;
-  }
-
-  return {
-    source_id: source.id,
-    tool: "extract_video_intel",
-    title: source.title,
-    url: source.url,
-    author: source.author,
-    published_at: source.publishedAt,
-    duration: source.duration,
-    transcript: source.transcript,
-    timeline: source.timeline,
-    key_frames: source.keyFrames,
-    facts: source.facts || []
-  };
-}
-
-function routeCandidate(candidate) {
-  if (candidate.source_type === "video") {
-    return "multimedia";
-  }
-  return "deep_analyst";
 }
 
 function createScratchpad(plan) {
@@ -229,7 +143,7 @@ function createScratchpad(plan) {
     facts_collected: [],
     queries_tried: [],
     sources_read: [],
-    conflict_found: [],
+    conflicts_found: [],
     temporary_conclusions: [],
     resolved_questions: [],
     missing_questions: [...plan.sub_questions],
@@ -237,9 +151,59 @@ function createScratchpad(plan) {
   };
 }
 
+function routeCandidate(candidate) {
+  if (candidate.source_type === "video") {
+    return "multimedia";
+  }
+  if (candidate.source_type === "forum") {
+    return "fact_verifier";
+  }
+  return "deep_analyst";
+}
+
+function selectCandidates(candidates) {
+  const sorted = [...candidates].sort((left, right) => right.score - left.score);
+  const selected = [];
+  const priorities = ["web", "video", "document", "forum"];
+
+  for (const type of priorities) {
+    const candidate = sorted.find((item) => item.source_type === type && !selected.some((picked) => picked.url === item.url));
+    if (candidate) {
+      selected.push(candidate);
+    }
+    if (selected.length >= 4) {
+      return selected;
+    }
+  }
+
+  for (const candidate of sorted) {
+    if (selected.some((item) => item.url === candidate.url)) {
+      continue;
+    }
+    selected.push(candidate);
+    if (selected.length >= 4) {
+      break;
+    }
+  }
+
+  return selected;
+}
+
+function buildEvidenceItems(reads) {
+  return reads.map((item) => ({
+    source_id: item.source_id,
+    title: item.title,
+    source_type: item.source_type || (item.tool === "extract_video_intel" ? "video" : "web"),
+    key_points: item.key_points || item.timeline?.map((entry) => entry.summary) || [],
+    markdown: item.markdown || "",
+    timeline: item.timeline || [],
+    facts: (item.facts || []).map((fact) => ({ ...fact, source_id: item.source_id }))
+  }));
+}
+
 function scoreQuestionCoverage(question, evidenceItems) {
-  const questionTokens = tokenize(question);
-  if (!questionTokens.length) {
+  const tokens = buildIntentTokens(question);
+  if (!tokens.length) {
     return 0;
   }
 
@@ -250,16 +214,11 @@ function scoreQuestionCoverage(question, evidenceItems) {
       ...(item.key_points || []),
       item.markdown || "",
       ...((item.timeline || []).map((entry) => entry.summary)),
-      ...(item.facts || []).map((fact) => `${fact.claim} ${fact.value}`)
+      ...(item.facts || []).map((fact) => fact.claim)
     ].join(" "));
 
-    let hits = 0;
-    for (const token of questionTokens) {
-      if (blob.includes(token)) {
-        hits += 1;
-      }
-    }
-    best = Math.max(best, hits / questionTokens.length);
+    const hits = tokens.filter((token) => blob.includes(token)).length;
+    best = Math.max(best, hits / tokens.length);
   }
   return best;
 }
@@ -267,53 +226,47 @@ function scoreQuestionCoverage(question, evidenceItems) {
 function crossCheckFacts(facts) {
   const grouped = new Map();
   for (const fact of facts) {
-    const key = `${fact.subject}:${fact.kind}`;
-    const list = grouped.get(key) || [];
-    list.push(fact);
-    grouped.set(key, list);
+    const key = `${fact.subject}:${fact.kind}:${fact.unit || ""}`;
+    const items = grouped.get(key) || [];
+    items.push(fact);
+    grouped.set(key, items);
   }
 
   const confirmations = [];
   const conflicts = [];
 
-  for (const [key, entries] of grouped.entries()) {
-    if (entries.length < 2) {
+  for (const [key, items] of grouped.entries()) {
+    if (items.length < 2) {
       confirmations.push({
         key,
         status: "single_source",
-        preferred_fact: entries[0],
-        reason: "只有单一来源，暂不构成冲突。"
+        preferred_fact: items[0],
+        reason: "只有单一来源命中该数字事实。"
       });
       continue;
     }
 
-    const distinctValues = Array.from(new Set(entries.map((entry) => JSON.stringify(entry.value))));
-    const [subject, kind] = key.split(":");
-    const preferredFact = [...entries].sort((left, right) => {
-      const leftSource = sources.find((source) => source.id === left.source_id) || {};
-      const rightSource = sources.find((source) => source.id === right.source_id) || {};
-      return (rightSource.authorityScore || 0) - (leftSource.authorityScore || 0);
+    const uniqueValues = Array.from(new Set(items.map((item) => JSON.stringify(item.value))));
+    const preferredFact = [...items].sort((left, right) => {
+      const leftScore = left.authority_score || 0;
+      const rightScore = right.authority_score || 0;
+      return rightScore - leftScore;
     })[0];
 
-    const isComplementaryTextFact =
-      kind && /(architecture_update|architecture_focus|efficiency_focus|core_workflow)/.test(kind) && entries.every((entry) => typeof entry.value === "string");
-
-    if (distinctValues.length === 1 || isComplementaryTextFact) {
+    if (uniqueValues.length === 1) {
       confirmations.push({
         key,
-        status: isComplementaryTextFact ? "complementary" : "confirmed",
+        status: "confirmed",
         preferred_fact: preferredFact,
-        reason: isComplementaryTextFact
-          ? `同一主题 ${subject} 的多个来源提供互补更新，不视为直接冲突。`
-          : "多个来源一致。"
+        reason: "多个来源给出了相同数字。"
       });
     } else {
       conflicts.push({
         key,
         status: "conflict",
-        candidates: entries,
+        candidates: items,
         preferred_fact: preferredFact,
-        reason: "多个来源给出不同值，优先保留权威度更高来源，同时标记不确定性。"
+        reason: "多个来源给出了不同数字，需要保留争议和来源差异。"
       });
     }
   }
@@ -322,79 +275,59 @@ function crossCheckFacts(facts) {
 }
 
 function evaluator(plan, scratchpad, evidenceItems, verification, roundsCompleted) {
-  const facts = evidenceItems.flatMap((item) => item.facts || []);
-  const factKinds = new Set(facts.map((fact) => fact.kind));
-  const subjects = new Set(facts.map((fact) => fact.subject));
+  const sourceTypesCovered = new Set(scratchpad.sources_read.map((item) => item.source_type));
+  const intentTokens = buildIntentTokens(plan.task_goal);
+  const overallCoverage = scoreQuestionCoverage(plan.task_goal, evidenceItems);
+  const hasEnoughDiversity = sourceTypesCovered.size >= 2;
+  const hasEnoughEvidence = evidenceItems.length >= 3;
   const resolvedQuestions = [];
   const missingQuestions = [];
 
-  for (const question of plan.sub_questions) {
-    let resolved = false;
-
-    if (question.includes("当前状态")) {
-      resolved = factKinds.has("duration_limit_seconds") || factKinds.has("cpu_uplift_percent");
-    } else if (question.includes("历史基线")) {
-      resolved = factKinds.has("launch_duration_seconds") || subjects.size >= 2 || evidenceItems.length >= 2;
-    } else if (question.includes("差异体现")) {
-      resolved = factKinds.has("architecture_update") || factKinds.has("gpu_uplift_percent") || factKinds.has("efficiency_focus");
-    } else if (question.includes("直接答案")) {
-      resolved = facts.length >= 1;
-    } else if (question.includes("证据")) {
-      resolved = evidenceItems.length >= 2;
-    }
-
-    if (!resolved) {
-      const coverage = scoreQuestionCoverage(question, evidenceItems);
-      resolved = coverage >= 0.3;
-    }
-
-    if (resolved) {
-      resolvedQuestions.push(question);
-    } else {
-      missingQuestions.push(question);
+  if (overallCoverage >= 0.18 && hasEnoughDiversity && hasEnoughEvidence) {
+    resolvedQuestions.push(...plan.sub_questions);
+  } else {
+    for (const question of plan.sub_questions) {
+      const coverage = scoreQuestionCoverage(`${plan.task_goal} ${question}`, evidenceItems);
+      if (coverage >= 0.18 || (hasEnoughEvidence && coverage >= 0.12)) {
+        resolvedQuestions.push(question);
+      } else {
+        missingQuestions.push(question);
+      }
     }
   }
 
-  const sourceTypesCovered = new Set(scratchpad.sources_read.map((item) => item.source_type));
-  const hasEnoughDiversity = sourceTypesCovered.size >= 2 || evidenceItems.length >= 3;
-  const severeConflicts = verification.conflicts.length > 1;
-  const isSufficient = missingQuestions.length === 0 && hasEnoughDiversity && !severeConflicts;
+  const relevantConflicts = verification.conflicts.filter((item) => {
+    const blob = normalizeText(item.preferred_fact?.claim || item.key || "");
+    if (!intentTokens.length) {
+      return true;
+    }
+    return intentTokens.filter((token) => blob.includes(token)).length >= 1;
+  });
+  const hardConflict = relevantConflicts.length >= 2;
+  const isSufficient = missingQuestions.length === 0 && hasEnoughDiversity && hasEnoughEvidence && !hardConflict;
 
   return {
     is_sufficient: isSufficient,
     resolved_questions: resolvedQuestions,
     missing_questions: missingQuestions,
-    risk_notes: severeConflicts
-      ? ["仍存在多项关键事实冲突，结论需保留不确定性。"]
-      : verification.conflicts.length
-        ? ["存在轻度冲突，已按权威度优先处理。"]
-        : [],
+    risk_notes: [
+      ...(!hasEnoughDiversity ? ["来源类型仍不够丰富。"] : []),
+      ...(relevantConflicts.length ? ["存在数字或版本冲突，需要在结论里明确标注。"] : [])
+    ],
     next_best_action: isSufficient
       ? "synthesize_answer"
       : roundsCompleted >= 2
         ? "stop_with_partial_answer"
         : "run_follow_up_search",
     reason: isSufficient
-      ? "子问题已覆盖，且来源类型达到最低多样性要求。"
-      : "仍有子问题未覆盖或关键信息冲突未收敛。"
+      ? "核心子问题已经被两类以上来源覆盖。"
+      : "仍有子问题证据不足，或者来源类型不够，或者存在尚未收敛的冲突。"
   };
-}
-
-function buildEvidenceItems(reads) {
-  return reads.filter(Boolean).map((item) => ({
-    source_id: item.source_id,
-    title: item.title,
-    source_type: item.tool === "extract_video_intel" ? "video" : "web",
-    key_points: item.key_points || item.timeline?.map((entry) => entry.summary) || [],
-    markdown: item.markdown || "",
-    timeline: item.timeline || [],
-    facts: (item.facts || []).map((fact) => ({ ...fact, source_id: item.source_id }))
-  }));
 }
 
 function formatFact(fact) {
   if (typeof fact.value === "number") {
-    return `${fact.claim}（${fact.value}${fact.unit ? ` ${fact.unit}` : ""}）`;
+    return `${fact.claim}（${fact.value} ${fact.unit || ""}）`.trim();
   }
   return fact.claim;
 }
@@ -402,71 +335,74 @@ function formatFact(fact) {
 function synthesize(question, mode, candidates, reads, verification, evaluation) {
   const evidenceItems = buildEvidenceItems(reads);
   const allFacts = evidenceItems.flatMap((item) => item.facts);
+  const intentTokens = buildIntentTokens(question);
+  const relevantConflicts = verification.conflicts.filter((item) => {
+    const blob = normalizeText(item.preferred_fact?.claim || item.key || "");
+    if (!intentTokens.length) {
+      return true;
+    }
+    return intentTokens.filter((token) => blob.includes(token)).length >= 1;
+  });
   const preferredFacts = [
     ...verification.confirmations.map((entry) => entry.preferred_fact),
-    ...verification.conflicts.map((entry) => entry.preferred_fact)
+    ...relevantConflicts.map((entry) => entry.preferred_fact)
   ].filter(Boolean);
-  const factPriority = {
-    duration_limit_seconds: 1,
-    launch_duration_seconds: 2,
-    cpu_uplift_percent: 3,
-    gpu_uplift_percent: 4,
-    architecture_focus: 5,
-    architecture_update: 6,
-    efficiency_focus: 7,
-    core_workflow: 8
-  };
-  const topFacts = dedupeBy(preferredFacts.length ? preferredFacts : allFacts, (fact) => `${fact.subject}:${fact.kind}`)
-    .sort((left, right) => (factPriority[left.kind] || 99) - (factPriority[right.kind] || 99))
-    .slice(0, 5);
+  const factLines = dedupeBy(preferredFacts.length ? preferredFacts : allFacts, (fact) => `${fact.subject}:${fact.kind}:${fact.claim}`)
+    .filter((fact) => {
+      if (!intentTokens.length) {
+        return true;
+      }
+      const blob = normalizeText(fact.claim);
+      return intentTokens.filter((token) => blob.includes(token)).length >= 1;
+    })
+    .slice(0, 4)
+    .map(formatFact);
 
-  const quickAnswerLines = [];
-  if (topFacts.length) {
-    quickAnswerLines.push(`针对“${question}”，当前版本已经拿到 ${reads.length} 条深读结果和 ${candidates.length} 条候选来源。`);
-    quickAnswerLines.push(topFacts.map(formatFact).join("；"));
-  } else {
-    quickAnswerLines.push(`针对“${question}”，当前版本已完成规划和候选筛选，但证据仍偏弱。`);
+  const evidenceHighlights = reads
+    .slice(0, 4)
+    .map((item) => {
+      const highlights = item.key_points || item.timeline?.map((entry) => entry.summary) || [];
+      return {
+        title: item.title,
+        source_type: item.tool === "extract_video_intel" ? "video" : "web",
+        highlight: (highlights[0] || "该来源提供了与问题直接相关的正文或转写。").slice(0, 220)
+      };
+    });
+
+  const quickAnswerParts = [
+    `针对“${question}”，系统完成了 ${reads.length} 条深读/转写和 ${candidates.length} 条候选筛选。`,
+    factLines.length
+      ? `当前最强的结构化证据包括：${factLines.join("；")}`
+      : `当前高价值来源的结论集中在：${evidenceHighlights.map((item) => `${item.title} 指向“${item.highlight}”`).join("；")}`
+  ];
+
+  if (relevantConflicts.length) {
+    quickAnswerParts.push(`同时检测到 ${relevantConflicts.length} 处冲突，已在结论中保留不确定性。`);
   }
-
-  if (verification.conflicts.length) {
-    quickAnswerLines.push(`系统检测到 ${verification.conflicts.length} 个事实冲突，已按来源权威度和发布时间做降级处理。`);
-  }
-
-  const evidenceChain = reads.map((item) => {
-    const source = sources.find((entry) => entry.id === item.source_id);
-    return {
-      source_id: item.source_id,
-      title: item.title,
-      platform: source?.platform,
-      source_type: source?.sourceType,
-      why_it_matters: item.tool === "extract_video_intel"
-        ? "提供视频转写、时间轴和关键观点时间点"
-        : "提供正文、关键段落和结构化事实"
-    };
-  });
-
-  const deepResearchSummary = {
-    headline: `Deep Web Search 对问题“${question}”的研究摘要`,
-    conclusion: quickAnswerLines.join(" "),
-    evidence_chain: evidenceChain,
-    conflicts: verification.conflicts.map((entry) => ({
-      key: entry.key,
-      preferred_claim: entry.preferred_fact?.claim,
-      reason: entry.reason
-    })),
-    uncertainty: evaluation.risk_notes.length
-      ? evaluation.risk_notes
-      : verification.conflicts.length
-        ? ["存在少量来源冲突，需在真实联网接入后进一步核实。"]
-        : ["当前结论基于本地演示语料，不代表实时互联网结果。"],
-    confidence: Number(Math.max(0.35, Math.min(0.92, average(candidates.map((item) => item.authority_score)))).toFixed(2))
-  };
 
   return {
     mode,
-    headline: deepResearchSummary.headline,
-    quick_answer: quickAnswerLines.join(" "),
-    deep_research_summary: deepResearchSummary
+    headline: `深度网页研究台对问题“${question}”的研究摘要`,
+    quick_answer: quickAnswerParts.join(" "),
+    deep_research_summary: {
+      headline: `深度网页研究台对问题“${question}”的研究摘要`,
+      conclusion: quickAnswerParts.join(" "),
+      evidence_chain: reads.map((item) => ({
+        source_id: item.source_id,
+        title: item.title,
+        source_type: item.tool === "extract_video_intel" ? "video" : "web",
+        why_it_matters: (item.key_points || item.timeline?.map((entry) => entry.summary) || ["提供了直接证据。"])[0]
+      })),
+      conflicts: relevantConflicts.map((item) => ({
+        key: item.key,
+        preferred_claim: item.preferred_fact?.claim,
+        reason: item.reason
+      })),
+      uncertainty: evaluation.risk_notes.length
+        ? evaluation.risk_notes
+        : ["当前结果已来自真实来源，但仍应继续扩展更多权威连接器。"],
+      confidence: Number(Math.max(0.35, Math.min(0.92, average(candidates.map((item) => item.authority_score || 0.66)))).toFixed(2))
+    }
   };
 }
 
@@ -474,69 +410,54 @@ function summarizeExperience(question, scratchpad, plan, evaluation) {
   return {
     created_at: new Date().toISOString(),
     question,
-    useful_queries: scratchpad.queries_tried.slice(0, 4),
+    useful_queries: scratchpad.queries_tried.slice(0, 5),
     useful_source_types: Array.from(new Set(scratchpad.sources_read.map((item) => item.source_type))),
     note: evaluation.is_sufficient
-      ? `该问题可通过 ${plan.source_priority.slice(0, 3).map((item) => item.source_type).join(" + ")} 组合完成首轮闭环。`
-      : "该问题在当前语料内仍有缺口，真实接入时应补官方来源或更强核验。"
+      ? `该问题在当前版本中适合优先走 ${plan.source_priority.map((item) => item.source_type).slice(0, 3).join(" + ")} 的组合路径。`
+      : "该问题在当前真实接入层里仍有缺口，后续应补更强的网页搜索、官方源解析和视频平台接入。"
   };
 }
 
-function selectCandidates(candidates) {
-  const chosen = [];
-  const perTypeCount = new Map();
+async function runRound(queries, scratchpad) {
+  const pool = [];
 
-  for (const candidate of candidates.sort((left, right) => right.score - left.score)) {
-    const typeCount = perTypeCount.get(candidate.source_type) || 0;
-    if (typeCount >= 2 && chosen.length >= 4) {
-      continue;
-    }
-
-    chosen.push(candidate);
-    perTypeCount.set(candidate.source_type, typeCount + 1);
-    if (chosen.length >= 6) {
-      break;
-    }
-  }
-
-  return chosen;
-}
-
-function runRound(queries, scratchpad) {
-  const candidatePool = [];
   for (const query of queries) {
     scratchpad.queries_tried.push(query);
-    const results = enhancedSearch(query);
-    if (!results.length) {
-      scratchpad.failure_paths.push({
-        query,
-        reason: "No relevant candidates in local source pack."
-      });
+    try {
+      const candidates = await searchRealSources(query);
+      if (!candidates.length) {
+        scratchpad.failure_paths.push({ query, reason: "没有从真实来源拿到候选结果。" });
+      }
+      pool.push(...candidates);
+    } catch (error) {
+      scratchpad.failure_paths.push({ query, reason: error.message });
     }
-    candidatePool.push(...results);
   }
 
-  const uniqueCandidates = dedupeBy(candidatePool, (item) => item.id).sort((left, right) => right.score - left.score);
+  const uniqueCandidates = dedupeBy(pool, (item) => item.url).sort((left, right) => right.score - left.score);
   const selected = selectCandidates(uniqueCandidates);
-  const routedTasks = [];
   const reads = [];
+  const routedTasks = [];
 
   for (const candidate of selected) {
-    const route = routeCandidate(candidate);
-    routedTasks.push({
-      source_id: candidate.id,
-      tool: route === "multimedia" ? "extract_video_intel" : "deep_read_page",
-      agent: route
-    });
+    const agent = routeCandidate(candidate);
+    const tool = candidate.source_type === "video" ? "extract_video_intel" : "deep_read_page";
+    routedTasks.push({ source_id: candidate.id, agent, tool, connector: candidate.connector });
 
-    const output = route === "multimedia" ? extractVideoIntel(candidate.id) : deepReadPage(candidate.id);
-    if (output) {
-      reads.push(output);
+    try {
+      const readResult = await readCandidate(candidate);
+      reads.push(readResult);
       scratchpad.sources_read.push({
         source_id: candidate.id,
         title: candidate.title,
         source_type: candidate.source_type,
-        tool: routedTasks[routedTasks.length - 1].tool
+        connector: candidate.connector,
+        tool
+      });
+    } catch (error) {
+      scratchpad.failure_paths.push({
+        query: candidate.url,
+        reason: `${candidate.connector} read failed: ${error.message}`
       });
     }
   }
@@ -550,13 +471,15 @@ function runRound(queries, scratchpad) {
 }
 
 function buildFollowUpQueries(question, evaluation) {
-  if (!evaluation.missing_questions.length) {
+  if (!evaluation?.missing_questions?.length) {
     return [];
   }
-  return evaluation.missing_questions.map((item) => `${question} ${item}`).slice(0, 2);
+  return evaluation.missing_questions
+    .flatMap((item) => buildEnglishQueryHints(`${question} ${item}`))
+    .slice(0, 3);
 }
 
-function runResearch({ question, mode }) {
+async function runResearch({ question, mode }) {
   const plan = planner(question);
   const scratchpad = createScratchpad(plan);
   const rounds = [];
@@ -571,15 +494,16 @@ function runResearch({ question, mode }) {
       break;
     }
 
-    const round = runRound(queries, scratchpad);
-    combinedCandidates = dedupeBy([...combinedCandidates, ...round.candidates], (item) => item.id).sort((left, right) => right.score - left.score);
+    const round = await runRound(queries, scratchpad);
+    combinedCandidates = dedupeBy([...combinedCandidates, ...round.candidates], (item) => item.url).sort((left, right) => right.score - left.score);
     combinedReads = dedupeBy([...combinedReads, ...round.reads], (item) => item.source_id);
 
-    const facts = buildEvidenceItems(combinedReads).flatMap((item) => item.facts);
+    const evidenceItems = buildEvidenceItems(combinedReads);
+    const facts = evidenceItems.flatMap((item) => item.facts);
     scratchpad.facts_collected = facts;
     verification = crossCheckFacts(facts);
-    scratchpad.conflict_found = verification.conflicts;
-    evaluation = evaluator(plan, scratchpad, buildEvidenceItems(combinedReads), verification, index + 1);
+    scratchpad.conflicts_found = verification.conflicts;
+    evaluation = evaluator(plan, scratchpad, evidenceItems, verification, index + 1);
     scratchpad.resolved_questions = evaluation.resolved_questions;
     scratchpad.missing_questions = evaluation.missing_questions;
 
@@ -587,7 +511,12 @@ function runResearch({ question, mode }) {
       round: index + 1,
       queries,
       candidates_returned: round.candidates.length,
-      selected_sources: round.selected.map((item) => item.id),
+      selected_sources: round.selected.map((item) => ({
+        id: item.id,
+        title: item.title,
+        source_type: item.source_type,
+        connector: item.connector
+      })),
       routed_tasks: round.routed_tasks,
       evaluation_snapshot: {
         is_sufficient: evaluation.is_sufficient,
@@ -601,6 +530,17 @@ function runResearch({ question, mode }) {
     }
   }
 
+  if (!evaluation) {
+    evaluation = {
+      is_sufficient: false,
+      resolved_questions: [],
+      missing_questions: plan.sub_questions,
+      risk_notes: ["当前未从真实来源拿到足够结果。"],
+      next_best_action: "manual_review",
+      reason: "搜索阶段没有成功返回可用候选。"
+    };
+  }
+
   const finalAnswer = synthesize(question, mode, combinedCandidates, combinedReads, verification, evaluation);
   const experience = summarizeExperience(question, scratchpad, plan, evaluation);
   const memory = readExperienceMemory();
@@ -611,7 +551,7 @@ function runResearch({ question, mode }) {
     question,
     plan,
     rounds,
-    candidates: combinedCandidates.slice(0, 10),
+    candidates: combinedCandidates.slice(0, 12),
     reads: combinedReads,
     verification,
     evaluation,
@@ -624,5 +564,6 @@ function runResearch({ question, mode }) {
 module.exports = {
   runResearch,
   getSamples,
-  getExperienceMemory
+  getExperienceMemory,
+  getSourceCapabilities
 };

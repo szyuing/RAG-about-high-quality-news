@@ -2,6 +2,18 @@ const state = {
   memory: []
 };
 
+const sourceTypeLabels = {
+  web: "网页",
+  forum: "讨论",
+  document: "文档",
+  video: "视频"
+};
+
+const toolLabels = {
+  deep_read_page: "正文深读",
+  extract_video_intel: "视频提取"
+};
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -15,6 +27,14 @@ function prettyJson(targetId, data) {
   document.getElementById(targetId).textContent = data ? JSON.stringify(data, null, 2) : "等待输出...";
 }
 
+function displaySourceType(value) {
+  return sourceTypeLabels[value] || value || "未知";
+}
+
+function displayTool(value) {
+  return toolLabels[value] || value || "未知工具";
+}
+
 function renderSamples(prompts) {
   const container = document.getElementById("sampleList");
   container.innerHTML = prompts
@@ -26,6 +46,19 @@ function renderSamples(prompts) {
       document.getElementById("questionInput").value = button.dataset.prompt;
     });
   });
+}
+
+function renderCapabilities(capabilities) {
+  const container = document.getElementById("capabilityList");
+  container.innerHTML = capabilities.map((item) => `
+    <article class="data-card">
+      <div class="data-card-top">
+        <span class="pill">${escapeHtml(displaySourceType(item.source_type))}</span>
+      </div>
+      <h4>${escapeHtml(item.label)}</h4>
+      <p>${escapeHtml(item.description)}</p>
+    </article>
+  `).join("");
 }
 
 function renderMemory(entries) {
@@ -43,7 +76,7 @@ function renderMemory(entries) {
       <h4>${escapeHtml(entry.question)}</h4>
       <p>${escapeHtml(entry.note)}</p>
       <div class="memory-tags">
-        ${(entry.useful_source_types || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+        ${(entry.useful_source_types || []).map((item) => `<span>${escapeHtml(displaySourceType(item))}</span>`).join("")}
       </div>
     </article>
   `).join("");
@@ -68,13 +101,15 @@ function renderFinalAnswer(result) {
       <section>
         <h4>证据链</h4>
         <ul class="tight-list">
-          ${evidenceList.map((item) => `<li>${escapeHtml(item.title)} · ${escapeHtml(item.platform || "")} · ${escapeHtml(item.why_it_matters)}</li>`).join("")}
+          ${evidenceList.map((item) => `<li>${escapeHtml(item.title)} · ${escapeHtml(displaySourceType(item.source_type))} · ${escapeHtml(item.why_it_matters)}</li>`).join("")}
         </ul>
       </section>
       <section>
         <h4>冲突处理</h4>
         <ul class="tight-list">
-          ${(conflicts.length ? conflicts : [{ preferred_claim: "无显著冲突", reason: "当前样例语料内未发现关键事实冲突。" }]).map((item) => `<li>${escapeHtml(item.preferred_claim || "无")} · ${escapeHtml(item.reason)}</li>`).join("")}
+          ${(conflicts.length ? conflicts : [{ preferred_claim: "无显著冲突", reason: "当前轮次没有发现明确的数字冲突。" }])
+            .map((item) => `<li>${escapeHtml(item.preferred_claim || "无")} · ${escapeHtml(item.reason)}</li>`)
+            .join("")}
         </ul>
       </section>
       <section>
@@ -104,8 +139,8 @@ function renderRounds(rounds) {
       <div class="timeline-index">R${round.round}</div>
       <div class="timeline-body">
         <h4>第 ${round.round} 轮</h4>
-        <p><strong>Queries:</strong> ${round.queries.map(escapeHtml).join(" / ")}</p>
-        <p><strong>选中来源:</strong> ${round.selected_sources.map(escapeHtml).join(", ")}</p>
+        <p><strong>查询词:</strong> ${round.queries.map(escapeHtml).join(" / ")}</p>
+        <p><strong>选中来源:</strong> ${round.selected_sources.map((item) => `${escapeHtml(item.title)} (${escapeHtml(item.connector)})`).join("；")}</p>
         <p><strong>下一步:</strong> ${escapeHtml(round.evaluation_snapshot.next_best_action)}</p>
       </div>
     </article>
@@ -124,12 +159,12 @@ function renderCandidates(candidates) {
   container.innerHTML = candidates.map((item) => `
     <article class="data-card">
       <div class="data-card-top">
-        <span class="pill">${escapeHtml(item.source_type)}</span>
-        <span class="score">score ${item.score}</span>
+        <span class="pill">${escapeHtml(displaySourceType(item.source_type))}</span>
+        <span class="score">${escapeHtml(item.connector)}</span>
       </div>
       <h4>${escapeHtml(item.title)}</h4>
       <p>${escapeHtml(item.summary)}</p>
-      <div class="meta-line">${escapeHtml(item.platform)} · ${escapeHtml(item.author || "Unknown")} · authority ${item.authority_score}</div>
+      <div class="meta-line">${escapeHtml(item.platform)} · ${escapeHtml(item.author || "未知作者")} · 权威分 ${item.authority_score}</div>
     </article>
   `).join("");
 }
@@ -148,8 +183,8 @@ function renderReads(reads) {
     return `
       <article class="data-card">
         <div class="data-card-top">
-          <span class="pill">${escapeHtml(item.tool)}</span>
-          <span class="score">${escapeHtml(item.published_at || "")}</span>
+          <span class="pill">${escapeHtml(displayTool(item.tool))}</span>
+          <span class="score">${escapeHtml(item.published_at || item.duration || "")}</span>
         </div>
         <h4>${escapeHtml(item.title)}</h4>
         <ul class="tight-list">
@@ -164,6 +199,7 @@ async function fetchSamples() {
   const response = await fetch("/api/samples");
   const data = await response.json();
   renderSamples(data.prompts || []);
+  renderCapabilities(data.source_capabilities || []);
   state.memory = data.experience_memory || [];
   renderMemory(state.memory);
 }
@@ -234,7 +270,7 @@ function resetView() {
   prettyJson("planOutput", null);
   prettyJson("evaluationOutput", null);
   document.getElementById("roundsOutput").className = "timeline empty-state";
-  document.getElementById("roundsOutput").textContent = "运行后展示多 Agent 闭环。";
+  document.getElementById("roundsOutput").textContent = "运行后展示多代理闭环。";
   document.getElementById("candidateOutput").className = "card-list empty-state";
   document.getElementById("candidateOutput").textContent = "等待候选结果...";
   document.getElementById("readOutput").className = "card-list empty-state";

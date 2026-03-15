@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Deep Web Search MVP</title>
+    <title>深度网页研究台</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
@@ -12,25 +12,25 @@
     <main class="shell">
       <section class="hero">
         <div class="hero-copy">
-          <p class="eyebrow">Deep Web Search MVP</p>
+          <p class="eyebrow">深度网页研究台</p>
           <h1>先规划，再搜索，再组织证据。</h1>
           <p class="hero-text">
-            第一版产品聚焦 MVP 主链路：Supervisor 规划任务，Web Researcher 收集候选，
-            Deep Analyst 与 Multimedia 提取证据，Evaluator 决定是否继续，Synthesizer 输出研究摘要。
+            当前版本已经切到真实来源接入层。研究流程会从任务规划开始，再去拉通用网页、讨论区、文档和视频来源，
+            然后把正文、摘要、转写和冲突组织成证据化回答。
           </p>
         </div>
         <div class="hero-card">
           <div class="metric">
-            <span>当前能力</span>
-            <strong>Planner / Search / Read / Video / Verify</strong>
+            <span>核心链路</span>
+            <strong>规划 / 搜索 / 深读 / 视频提取 / 核验 / 综合</strong>
           </div>
           <div class="metric">
-            <span>运行方式</span>
-            <strong>本地演示语料 + 可扩展接入层</strong>
+            <span>当前接入</span>
+            <strong>Bing Web、Hacker News、arXiv、TED</strong>
           </div>
           <div class="metric">
             <span>输出模式</span>
-            <strong>Quick Answer / Deep Research Summary</strong>
+            <strong>快速回答 / 深度研究摘要</strong>
           </div>
         </div>
       </section>
@@ -43,28 +43,37 @@
           </div>
           <label class="field">
             <span>研究问题</span>
-            <textarea id="questionInput" rows="6" placeholder="输入一个研究问题，例如：Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？"></textarea>
+            <textarea id="questionInput" rows="6" placeholder="例如：Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？"></textarea>
           </label>
           <div class="controls">
             <label class="mode-toggle">
               <input type="radio" name="mode" value="deep" checked>
-              <span>Deep Research Summary</span>
+              <span>深度研究摘要</span>
             </label>
             <label class="mode-toggle">
               <input type="radio" name="mode" value="quick">
-              <span>Quick Answer</span>
+              <span>快速回答</span>
             </label>
           </div>
           <div class="actions">
             <button id="runButton" class="primary-button">运行研究流程</button>
             <button id="resetButton" class="ghost-button">清空结果</button>
           </div>
+
           <div class="sample-block">
             <div class="sample-header">
               <h3>示例问题</h3>
-              <p>点击填充后可直接运行。</p>
+              <p>点击即可填充并运行。</p>
             </div>
             <div id="sampleList" class="sample-list"></div>
+          </div>
+
+          <div class="sample-block">
+            <div class="sample-header">
+              <h3>来源能力</h3>
+              <p>当前真实接入的 4 类来源。</p>
+            </div>
+            <div id="capabilityList" class="card-list"></div>
           </div>
         </div>
 
@@ -81,13 +90,13 @@
             <section class="result-section two-column">
               <article class="sub-panel">
                 <div class="section-header">
-                  <h3>Planner</h3>
+                  <h3>任务规划</h3>
                 </div>
                 <pre id="planOutput" class="json-view">等待输出...</pre>
               </article>
               <article class="sub-panel">
                 <div class="section-header">
-                  <h3>Evaluator</h3>
+                  <h3>结果评估</h3>
                 </div>
                 <pre id="evaluationOutput" class="json-view">等待输出...</pre>
               </article>
@@ -97,7 +106,7 @@
               <div class="section-header">
                 <h3>研究轮次</h3>
               </div>
-              <div id="roundsOutput" class="timeline empty-state">运行后展示多 Agent 闭环。</div>
+              <div id="roundsOutput" class="timeline empty-state">运行后展示多代理闭环。</div>
             </section>
 
             <section class="result-section two-column">
@@ -117,7 +126,7 @@
 
             <section class="result-section">
               <div class="section-header">
-                <h3>Experience Memory</h3>
+                <h3>经验记忆</h3>
               </div>
               <div id="memoryOutput" class="memory-grid empty-state">等待历史经验...</div>
             </section>
