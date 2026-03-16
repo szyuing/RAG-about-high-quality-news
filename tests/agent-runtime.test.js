@@ -13,7 +13,7 @@ const {
 test("agent runtime should track task lifecycle, inbox, and outbox", () => {
   const runtime = createAgentRuntime(createAgentRegistry());
   const task = dispatchAgentTask(runtime, {
-    from: "supervisor",
+    from: "llm_orchestrator",
     agentId: "long_text_collector",
     taskType: "collect_long_text",
     input: { source_id: "source-1" },
@@ -22,7 +22,7 @@ test("agent runtime should track task lifecycle, inbox, and outbox", () => {
 
   assert.equal(runtime.agents.long_text_collector.status, "running");
   assert.equal(runtime.agents.long_text_collector.inbox.length, 1);
-  assert.equal(runtime.agents.supervisor.outbox.length, 1);
+  assert.equal(runtime.agents.llm_orchestrator.outbox.length, 1);
 
   completeAgentTask(runtime, task.id, { source_id: "source-1" });
 
@@ -35,7 +35,7 @@ test("agent runtime should track task lifecycle, inbox, and outbox", () => {
 test("agent runtime should capture failure state and snapshots", () => {
   const runtime = createAgentRuntime(createAgentRegistry());
   const task = dispatchAgentTask(runtime, {
-    from: "supervisor",
+    from: "llm_orchestrator",
     agentId: "fact_verifier",
     taskType: "verify_conflict"
   });

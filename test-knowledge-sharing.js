@@ -88,7 +88,7 @@ async function testKnowledgeSharing() {
   if (unresolvedConflicts.length > 0) {
     const conflict = unresolvedConflicts[0];
     const resolution = {
-      resolvedBy: AgentType.SUPERVISOR,
+      resolvedBy: AgentType.LLM_ORCHESTRATOR,
       resolution: 'Sora can generate videos up to 60 seconds, but quality may decrease for longer videos',
       confidence: 0.85
     };
@@ -141,14 +141,14 @@ async function testKnowledgeSharing() {
   );
   console.log('  Long Text Collector分析信息:', analysisKnowledgeId);
   
-  // Synthesizer综合信息
+  // LLM-Orchestrator综合信息
   const synthesisKnowledgeId = agentSystem.shareKnowledge(
-    AgentType.SYNTHESIZER,
+    AgentType.LLM_ORCHESTRATOR,
     'Sora represents a major breakthrough in AI-generated video, enabling high-quality 60-second videos from text',
     ['Sora', 'synthesis', 'summary'],
     0.85
   );
-  console.log('  Synthesizer综合信息:', synthesisKnowledgeId);
+  console.log('  LLM-Orchestrator综合信息:', synthesisKnowledgeId);
   
   // 搜索所有Sora相关知识
   const allSoraKnowledge = agentSystem.searchKnowledge('', ['Sora']);

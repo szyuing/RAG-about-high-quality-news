@@ -41,7 +41,7 @@ async function testStatePersistence() {
   
   // 3. 测试保存和加载Agent状态
   console.log('3. 测试保存和加载Agent状态:');
-  const agentId = AgentType.SUPERVISOR;
+  const agentId = AgentType.LLM_ORCHESTRATOR;
   const additionalState = {
     lastTask: 'Planning research workflow',
     performance: 'good'

@@ -8,12 +8,12 @@ test("StateGraph should normalize node_result, handoff, and stop_signal contract
   workflow.addNode("start", async () => ({
     state_patch: { count: 1 },
     node_result: {
-      agent: "supervisor",
+      agent: "llm_orchestrator",
       type: "planning",
       summary: "Seeded the workflow."
     },
     handoff: {
-      from: "supervisor",
+      from: "llm_orchestrator",
       to: "long_text_collector",
       reason: "Initial context is ready.",
       artifact: "plan"
@@ -46,7 +46,7 @@ test("StateGraph should normalize node_result, handoff, and stop_signal contract
 
   assert.equal(result.count, 2);
   assert.equal(result.workflowState.executionHistory.length, 2);
-  assert.equal(result.workflowState.node_results.start.agent, "supervisor");
+  assert.equal(result.workflowState.node_results.start.agent, "llm_orchestrator");
   assert.equal(result.workflowState.node_results.stop.type, "analysis");
   assert.equal(result.workflowState.handoffs.length, 1);
   assert.equal(result.workflowState.handoffs[0].artifact, "plan");
@@ -59,11 +59,16 @@ test("StateGraph should normalize node_result, handoff, and stop_signal contract
 test("createResearchWorkflow should emit standardized workflow metadata", async () => {
   const workflow = createResearchWorkflow();
   const agents = new Map([
-    [AgentType.SUPERVISOR, {
+    [AgentType.LLM_ORCHESTRATOR, {
       planTask: async () => ({
         sub_questions: ["What happened?", "Why does it matter?"],
-        needed_agents: [AgentType.WEB_RESEARCHER, AgentType.SYNTHESIZER],
+        needed_agents: [AgentType.WEB_RESEARCHER, AgentType.FACT_VERIFIER],
         source_strategy: ["web"]
+      }),
+      synthesizeAnswer: async () => ({
+        result: {
+          headline: "done"
+        }
       })
     }],
     [AgentType.WEB_RESEARCHER, {
@@ -91,13 +96,6 @@ test("createResearchWorkflow should emit standardized workflow metadata", async 
         }
       })
     }],
-    [AgentType.SYNTHESIZER, {
-      execute: async () => ({
-        result: {
-          headline: "done"
-        }
-      })
-    }]
   ]);
 
   const result = await workflow.run({
@@ -111,10 +109,10 @@ test("createResearchWorkflow should emit standardized workflow metadata", async 
   });
 
   assert.equal(result.workflowState.handoffs.length, 4);
-  assert.equal(result.workflowState.node_results.plan.agent, AgentType.SUPERVISOR);
+  assert.equal(result.workflowState.node_results.plan.agent, AgentType.LLM_ORCHESTRATOR);
   assert.equal(result.workflowState.node_results.search.outputs.candidate_count, 1);
   assert.equal(result.workflowState.node_results.verify.outputs.conflict_count, 0);
-  assert.equal(result.workflowState.node_results.synthesize.agent, AgentType.SYNTHESIZER);
+  assert.equal(result.workflowState.node_results.synthesize.agent, AgentType.LLM_ORCHESTRATOR);
   assert.equal(result.workflowState.stop_signal.reason, "workflow_completed");
   assert.equal(result.workflowState.stop_reason, "workflow_completed");
   assert.equal(result.workflowState.terminated_by, "synthesize");

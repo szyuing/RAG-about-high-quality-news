@@ -16,6 +16,9 @@ const {
   failAgentTask,
   getAgentRuntimeSnapshot,
   createAgentRegistry,
+  runtimeCapabilities
+} = require("./runtime");
+const {
   AgentSystem,
   routeCandidate,
   collectorToolForCandidate,
@@ -432,7 +435,7 @@ function planner(question, experienceHints = getRelevantExperienceHints(question
     task_goal: question,
     sub_questions: subQuestions,
     required_evidence: requiredEvidence,
-    source_strategy: "Supervisor selects connectors first, then dispatches candidates to specialist agents.",
+    source_strategy: "LLM-Orchestrator selects connectors first, then routes candidates to specialist agents.",
     preferred_connectors: preferredConnectors,
     chosen_connector_ids: chosenConnectorIds,
     experience_hints: experienceHints,
@@ -570,7 +573,7 @@ function updateQuestionStatus(scratchpad, resolvedQuestions, missingQuestions) {
 function recordVerificationReview(scratchpad, review) {
   for (const item of review?.tasks || []) {
     recordHandoff(scratchpad, {
-      from: "supervisor",
+      from: "llm_orchestrator",
       to: "fact_verifier",
       review_key: item.key,
       review_kind: item.kind,
@@ -927,7 +930,7 @@ function summarizeExperience(question, scratchpad, plan, evaluation, telemetry) 
     },
     noisy_paths: noisyPaths,
     note: evaluation.is_sufficient
-      ? "This question is a good fit for the current supervisor-plus-specialists workflow."
+      ? "This question is a good fit for the current llm-orchestrator-plus-specialists workflow."
       : "This question still exposes connector or evidence-model gaps that should be improved."
   };
 }
@@ -974,19 +977,19 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
   for (const query of queries) {
     addSharedNote(scratchpad, {
       type: "query",
-      agent: "supervisor",
+      agent: "llm_orchestrator",
       content: query
     });
   }
   appendTimelineEvent(scratchpad, {
     type: "round_started",
-    agent: "supervisor",
+    agent: "llm_orchestrator",
     queries
   });
-  const supervisorTask = runtime
+  const orchestratorTask = runtime
     ? dispatchAgentTask(runtime, {
-        from: "supervisor",
-        agentId: "supervisor",
+        from: "llm_orchestrator",
+        agentId: "llm_orchestrator",
         taskType: "coordinate_round",
         input: { queries },
         metadata: {
@@ -1028,7 +1031,7 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
   for (const task of routedTasks) {
     const candidate = selected.find((item) => item.id === task.source_id);
     recordHandoff(scratchpad, {
-      from: "supervisor",
+      from: "llm_orchestrator",
       to: task.agent,
       source_id: task.source_id,
       segment_source_id: task.segment_source_id || task.source_id,
@@ -1039,7 +1042,7 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
     if (candidate) {
       addSharedNote(scratchpad, {
         type: "parser_task",
-        agent: "supervisor",
+        agent: "llm_orchestrator",
         content: `${candidate.title}: ${task.agent} via ${task.tool}${task.pages ? ` pages ${task.pages.join("-")}` : ""}`
       });
     }
@@ -1078,8 +1081,8 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
     selected_sources: selected.map((item) => item.id),
     evidence_items: evidenceItems.length + fallback.evidence_items.length
   });
-  if (supervisorTask) {
-    completeAgentTask(runtime, supervisorTask.id, {
+  if (orchestratorTask) {
+    completeAgentTask(runtime, orchestratorTask.id, {
       candidate_count: candidates.length,
       selected_count: selected.length,
       routed_task_count: routedTasks.length
@@ -1177,7 +1180,7 @@ async function runResearch({ question, mode, onProgress }) {
 
     const roundAgentReport = {
       round: index + 1,
-      supervisor: {
+      llm_orchestrator: {
         queries,
         dispatched_tasks: round.routed_tasks
       },
@@ -1200,7 +1203,7 @@ async function runResearch({ question, mode, onProgress }) {
       }))
     };
     scratchpad.agent_reports.push(roundAgentReport);
-    recordAgentArtifact(scratchpad, "supervisor", {
+    recordAgentArtifact(scratchpad, "llm_orchestrator", {
       type: "round_report",
       round: index + 1,
       queries,
@@ -1300,9 +1303,9 @@ async function runResearch({ question, mode, onProgress }) {
     }
   });
 
-  const synthesizerTask = dispatchAgentTask(agentRuntime, {
-    from: "supervisor",
-    agentId: "synthesizer",
+  const synthesisTask = dispatchAgentTask(agentRuntime, {
+    from: "llm_orchestrator",
+    agentId: "llm_orchestrator",
     taskType: "synthesize_answer",
     input: {
       evidence_count: combinedEvidence.length,
@@ -1313,7 +1316,7 @@ async function runResearch({ question, mode, onProgress }) {
     }
   });
   const finalAnswer = synthesize(question, mode, combinedCandidates, combinedReads, combinedEvidence, verification, evaluation, telemetry);
-  completeAgentTask(agentRuntime, synthesizerTask.id, {
+  completeAgentTask(agentRuntime, synthesisTask.id, {
     confidence: finalAnswer?.summary?.confidence || null,
     answer_sections: Object.keys(finalAnswer || {})
   });
@@ -1336,6 +1339,9 @@ async function runResearch({ question, mode, onProgress }) {
     evaluation,
     scratchpad,
     knowledge_graph: knowledgeGraphExport,
+    runtime: {
+      capabilities: runtimeCapabilities
+    },
     agent_runtime: getAgentRuntimeSnapshot(agentRuntime),
     telemetry,
     tool_memory: toolMemory,

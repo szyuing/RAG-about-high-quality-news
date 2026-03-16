@@ -6,9 +6,9 @@ function createRuntimeTaskId(agentId, taskType) {
 
 function createAgentRegistry() {
   return {
-    supervisor: {
-      id: "supervisor",
-      prompt: "Plan rounds, dispatch specialist tasks, and enforce stop policy."
+    llm_orchestrator: {
+      id: "llm_orchestrator",
+      prompt: "Plan rounds, route specialist tasks, decide when to stop, and assemble the final answer."
     },
     web_researcher: {
       id: "web_researcher",
@@ -33,10 +33,6 @@ function createAgentRegistry() {
     fact_verifier: {
       id: "fact_verifier",
       prompt: "Compare conflicting evidence and explain which source is more credible and why."
-    },
-    synthesizer: {
-      id: "synthesizer",
-      prompt: "Assemble the final evidence-backed answer with uncertainty and conflicts."
     }
   };
 }
@@ -86,7 +82,7 @@ function pushRuntimeMessage(runtime, message) {
   return entry;
 }
 
-function dispatchAgentTask(runtime, { from = "supervisor", agentId, taskType, input = null, metadata = {} }) {
+function dispatchAgentTask(runtime, { from = "llm_orchestrator", agentId, taskType, input = null, metadata = {} }) {
   if (!runtime?.agents?.[agentId]) {
     throw new Error(`Unknown runtime agent: ${agentId}`);
   }

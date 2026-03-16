@@ -1,128 +1,61 @@
 # 项目与产品文档对比分析
 
-## 已实现功能
+## 已实现能力
 
 ### 核心架构
-- ✅ **多Agent编排架构**：实现了Supervisor + Specialists的多Agent系统
-- ✅ **状态机工作流引擎**：实现了基于StateGraph的工作流管理
-- ✅ **Agent通信与协作**：实现了Agent之间的消息传递机制
-- ✅ **状态持久化**：实现了系统状态、会话和Agent状态的持久化
 
-### Agent实现
-- ✅ **Supervisor Agent**：负责任务规划、任务分发和进度监控
-- ✅ **Web Researcher Agent**：负责广度搜索和候选收集
-- ✅ **Deep Analyst Agent**：负责深度阅读和长文分析
-- ✅ **Multimedia Agent**：负责视频内容提取和处理
-- ✅ **Fact Verifier Agent**：负责事实验证和冲突检测
-- ✅ **Synthesizer Agent**：负责整合输出和生成最终报告
+- ✅ **LLM-Orchestrator + Specialists**：任务规划、候选路由、停止判断、最终答案整合已经统一到 `LLM-Orchestrator`
+- ✅ **显式 Runtime**：已收口 `tools / state / memory / execution` 四类运行时职责
+- ✅ **StateGraph 工作流**：具备节点状态、handoff、stop signal 和执行历史
+- ✅ **Agent Runtime Trace**：支持任务分发、完成、失败和消息快照
 
-### 工具实现
-- ✅ **enhanced_search**：通过invokeSourceTool的discover动作实现
-- ✅ **deep_read_page**：实现了网页正文提取和结构化
-- ✅ **extract_video_intel**：实现了视频内容提取
-- ✅ **cross_check_facts**：实现了事实冲突检测和验证
+### Agent 层
 
-### 来源集成
-- ✅ **Bing Web + Jina Reader**：通用网页搜索与正文抽取
-- ✅ **IT之家**：中文科技新闻来源
-- ✅ **Hacker News**：讨论型来源
-- ✅ **SegmentFault**：中文技术长文来源
-- ✅ **arXiv**：文档与研究来源
-- ✅ **Bilibili**：中文视频来源
-- ✅ **抖音**：中文短视频来源
-- ✅ **TED**：视频Talk与transcript来源
+- ✅ **LLM-Orchestrator**：负责 `plan / route / stop / synthesize`
+- ✅ **Web Researcher**：负责广度搜索与候选池构建
+- ✅ **Long Text / Video / Chart / Table Parser**：负责按内容类型做提取
+- ✅ **Fact Verifier / Evaluator**：负责冲突识别、覆盖缺口和验证 follow-up
+- ✅ **Tool Creator**：负责按协议创建恢复工具
 
-### 核心流程
-- ✅ **任务理解与规划**：由Supervisor Agent完成
-- ✅ **广度搜索与候选收集**：由Web Researcher Agent完成
-- ✅ **候选筛选与任务分发**：由Supervisor Agent完成
-- ✅ **深度提取与正文化**：由Deep Analyst和Multimedia Agent完成
-- ✅ **Scratchpad记录与状态共享**：实现了过程记忆
-- ✅ **评估与反思**：由Evaluator模块完成
-- ✅ **整合输出**：由Synthesizer Agent完成
-- ✅ **经验沉淀**：实现了Experience Memory
+### Runtime 层
 
-### API接口
-- ✅ **健康检查**：/api/health
-- ✅ **获取样本数据**：/api/samples
-- ✅ **合成工具**：/api/tools/synthesize
-- ✅ **运行临时工具**：/api/tools/run-ephemeral
-- ✅ **流式研究**：/api/research/stream
-- ✅ **研究请求**：/api/research
+- ✅ **Tools**：统一 source tool、ephemeral tool 注册与调用
+- ✅ **State**：工作流状态、节点结果、handoff、stop 状态管理
+- ✅ **Memory**：Scratchpad、Experience Memory、Tool Memory、Knowledge Graph
+- ✅ **Execution**：agent task dispatch、runtime snapshot、失败追踪
 
-## 缺失功能
+### 研究闭环
 
-### Phase 1（MVP）缺失功能
-- ❌ **更完善的视频转文本能力**：当前视频处理能力较为基础，缺少完整的时间轴摘要和关键帧描述
-- ❌ **更强大的Fact Verifier**：当前实现较为轻量，缺少更复杂的冲突分析能力
-- ❌ **用户界面优化**：当前前端界面较为简单，缺少更丰富的交互功能
+- ✅ **任务理解与规划**：由 `LLM-Orchestrator` 完成
+- ✅ **候选筛选与任务分发**：由 `LLM-Orchestrator` 完成
+- ✅ **深度提取与多模态读取**：由 Specialist Agents 完成
+- ✅ **研究质量验证**：由 `Fact Verifier / Evaluator` 完成
+- ✅ **最终整合输出**：由 `LLM-Orchestrator` 完成
+- ✅ **经验沉淀**：已写入 `Experience Memory`
 
-### Phase 2缺失功能
-- ❌ **动态代码验证**：缺少run_verification_code能力，无法自动执行代码验证结论
-- ❌ **轻量版本化知识图谱**：缺少知识版本管理和冲突仲裁机制
-- ❌ **附件、表格、PDF、财报等深层资料提取**：缺少对复杂文档格式的处理能力
-- ❌ **Red Teaming式反向验证**：缺少专门的反向验证机制
+## 仍未完成的能力
 
-### Phase 3缺失功能
-- ❌ **Self-Evolving KG的持续更新**：缺少自演化知识图谱能力
-- ❌ **利益链分析**：缺少对作者、媒体、机构和平台的背景建模
-- ❌ **多立场舆论与博弈建模**：缺少对不同语境下观点的跟踪和分析
-- ❌ **长期主题跟踪**：缺少对特定主题的持续监控能力
-- ❌ **主动监控与预警**：缺少关键变量的持续巡检和预警机制
+### Phase 2
 
-### Ultimate缺失功能
-- ❌ **社会化探针**：缺少launch_social_probe能力，无法自动向外部发起询问
-- ❌ **即时工具合成**：缺少synthesize_tool和run_ephemeral_tool能力，无法临时创建专用工具
-- ❌ **Shadow API探测**：缺少发现和利用隐藏接口的能力
-- ❌ **Cross-Domain Synthesis**：缺少跨领域隐藏关联发现能力
-- ❌ **假设生成与推荐验证路径**：缺少提出新假设和验证方案的能力
-- ❌ **代码实验室**：缺少在沙盒里复现算法和benchmark的能力
-- ❌ **实验设计**：缺少设计对照实验和测试脚本的能力
+- ❌ 动态代码验证
+- ❌ 更成熟的版本化 Knowledge Graph 演进
+- ❌ 更强的复杂文档提取
+- ❌ Red Teaming 式反向验证
 
-## 实现差距分析
+### Phase 3+
 
-### 架构层面
-- 当前架构已实现了MVP要求的多Agent协作系统
-- 缺少更高级的知识管理和演化能力
-- 缺少对外交互和自主行动的能力
+- ❌ Self-evolving knowledge graph
+- ❌ 利益链与立场建模
+- ❌ 长期主题跟踪
+- ❌ 主动监控与预警
+- ❌ 假设生成与推荐验证路径
 
-### 功能层面
-- 核心搜索和分析功能已实现
-- 缺少验证和实验能力
-- 缺少长期记忆和知识图谱能力
-- 缺少主动监控和预警能力
+## 当前差距结论
 
-### 技术层面
-- 已实现基础的工具调用和执行
-- 缺少更复杂的代码生成和执行能力
-- 缺少知识图谱和推理能力
-- 缺少多模态内容的深度理解能力
+当前仓库已经完成 MVP 主闭环，并且把旧的双层编排 + 隐式 runtime 模型收口为：
 
-## 改进建议
+- `LLM-Orchestrator` 负责高层研究编排与最终答案
+- `Verifier / Evaluator Agent` 负责研究级 validation
+- `Runtime` 负责工具、状态、记忆与执行
 
-### 短期改进（MVP完善）
-1. **增强视频处理能力**：完善视频转文本和时间轴摘要功能
-2. **优化Fact Verifier**：增强冲突分析和可信度判断能力
-3. **改进用户界面**：提供更丰富的交互功能和可视化结果展示
-4. **完善API文档**：确保API接口的完整文档和使用示例
-
-### 中期改进（Phase 2）
-1. **实现动态代码验证**：添加run_verification_code能力
-2. **构建轻量知识图谱**：实现基础的知识版本管理
-3. **增强文档处理能力**：支持PDF、表格等复杂文档格式
-4. **添加反向验证机制**：实现Red Teaming式的反向验证
-
-### 长期改进（Phase 3+）
-1. **构建自演化知识图谱**：实现知识的持续更新和演化
-2. **添加社会化探针**：实现向外部发起询问的能力
-3. **开发即时工具合成**：实现临时创建专用工具的能力
-4. **增强跨领域分析**：实现隐藏关联发现能力
-5. **添加主动监控和预警**：实现关键变量的持续巡检
-
-## 结论
-
-当前项目已经实现了产品文档中MVP阶段的核心功能，包括多Agent编排、搜索、深读、视频处理、事实验证和证据化输出。系统架构完整，API接口齐全，来源覆盖广泛。
-
-然而，项目在高级能力方面还存在明显差距，特别是在代码验证、知识图谱、社会化探针、即时工具合成等方面。这些功能需要在后续的Phase 2、Phase 3和Ultimate阶段逐步实现。
-
-总体来说，当前项目已经构建了一个功能完备的深度网页研究系统，满足了MVP阶段的要求，为后续的功能扩展和能力提升奠定了坚实的基础。
+当前主要缺口已经不再是架构边界不清，而是更高阶的验证能力、复杂文档解析和持续演化能力。

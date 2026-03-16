@@ -3,14 +3,13 @@ const {
   createAgent,
   AgentType,
   AgentStatus,
-  SupervisorAgent,
+  LLMOrchestratorAgent,
   WebResearcherAgent,
   LongTextCollectorAgent,
   VideoParserAgent,
   ChartParserAgent,
   TableParserAgent,
-  FactVerifierAgent,
-  SynthesizerAgent
+  FactVerifierAgent
 } = require('./src/agent-orchestrator');
 
 async function testAgentSystem() {
@@ -18,14 +17,13 @@ async function testAgentSystem() {
   
   // 1. 测试 Agent 类型枚举
   console.log('1. Agent 类型枚举:');
-  console.log('  SUPERVISOR:', AgentType.SUPERVISOR);
+  console.log('  LLM_ORCHESTRATOR:', AgentType.LLM_ORCHESTRATOR);
   console.log('  WEB_RESEARCHER:', AgentType.WEB_RESEARCHER);
   console.log('  LONG_TEXT_COLLECTOR:', AgentType.LONG_TEXT_COLLECTOR);
   console.log('  VIDEO_PARSER:', AgentType.VIDEO_PARSER);
   console.log('  CHART_PARSER:', AgentType.CHART_PARSER);
   console.log('  TABLE_PARSER:', AgentType.TABLE_PARSER);
   console.log('  FACT_VERIFIER:', AgentType.FACT_VERIFIER);
-  console.log('  SYNTHESIZER:', AgentType.SYNTHESIZER);
   console.log('');
   
   // 2. 测试 Agent 状态枚举
@@ -52,10 +50,10 @@ async function testAgentSystem() {
   });
   console.log('');
   
-  // 5. 测试 Supervisor Agent 任务规划
-  console.log('5. Supervisor Agent 任务规划:');
-  const supervisor = agentSystem.getAgent(AgentType.SUPERVISOR);
-  const plan = await supervisor.planTask('Sora 模型现在的生成时长上限是多少？', {});
+  // 5. 测试 LLM-Orchestrator 任务规划
+  console.log('5. LLM-Orchestrator 任务规划:');
+  const orchestrator = agentSystem.getAgent(AgentType.LLM_ORCHESTRATOR);
+  const plan = await orchestrator.planTask('Sora 模型现在的生成时长上限是多少？', {});
   console.log('  规划结果:');
   console.log('    任务目标:', plan.task_goal);
   console.log('    子问题:', plan.sub_questions);
@@ -72,9 +70,9 @@ async function testAgentSystem() {
   // 7. 测试各个 Agent 类
   console.log('7. 测试各个 Agent 类:');
   
-  // Supervisor Agent
-  const sup = new SupervisorAgent({ id: 'test-supervisor', name: 'Test Supervisor' });
-  console.log('  Supervisor Agent:', sup.id, sup.name, sup.type);
+  // LLM-Orchestrator
+  const orchestratorAgent = new LLMOrchestratorAgent({ id: 'test-orchestrator', name: 'Test LLM-Orchestrator' });
+  console.log('  LLM-Orchestrator:', orchestratorAgent.id, orchestratorAgent.name, orchestratorAgent.type);
   
   // Web Researcher Agent
   const web = new WebResearcherAgent({ id: 'test-web', name: 'Test Web Researcher' });
@@ -100,16 +98,13 @@ async function testAgentSystem() {
   const verifier = new FactVerifierAgent({ id: 'test-verifier', name: 'Test Fact Verifier' });
   console.log('  Fact Verifier Agent:', verifier.id, verifier.name, verifier.type);
   
-  // Synthesizer Agent
-  const synth = new SynthesizerAgent({ id: 'test-synth', name: 'Test Synthesizer' });
-  console.log('  Synthesizer Agent:', synth.id, synth.name, synth.type);
   console.log('');
   
   // 8. 测试工作流执行
   console.log('8. 测试工作流执行（模拟）:');
   const workflow = [
     {
-      agentType: AgentType.SUPERVISOR,
+      agentType: AgentType.LLM_ORCHESTRATOR,
       input: { question: '测试问题' }
     },
     {

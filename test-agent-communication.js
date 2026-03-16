@@ -13,7 +13,7 @@ async function testAgentCommunication() {
   
   // 发送请求消息
   const requestMessage = agentSystem.sendRequest(
-    AgentType.SUPERVISOR,
+    AgentType.LLM_ORCHESTRATOR,
     AgentType.WEB_RESEARCHER,
     'Please search for information about Sora model',
     { query: 'Sora model OpenAI', priority: 'high' }
@@ -23,7 +23,7 @@ async function testAgentCommunication() {
   // 发送响应消息
   const responseMessage = agentSystem.sendResponse(
     AgentType.WEB_RESEARCHER,
-    AgentType.SUPERVISOR,
+    AgentType.LLM_ORCHESTRATOR,
     'Found information about Sora model',
     { results: 5, status: 'completed' }
   );
@@ -31,7 +31,7 @@ async function testAgentCommunication() {
   
   // 发送通知消息
   const notificationMessage = agentSystem.sendNotification(
-    AgentType.SUPERVISOR,
+    AgentType.LLM_ORCHESTRATOR,
     AgentType.LONG_TEXT_COLLECTOR,
     'Please analyze the search results',
     { taskId: 'task_123' }
@@ -41,7 +41,7 @@ async function testAgentCommunication() {
   // 发送错误消息
   const errorMessage = agentSystem.sendError(
     AgentType.WEB_RESEARCHER,
-    AgentType.SUPERVISOR,
+    AgentType.LLM_ORCHESTRATOR,
     'Search failed',
     { error: 'Network error', retry: true }
   );
@@ -61,7 +61,7 @@ async function testAgentCommunication() {
   
   // 再次发送消息给Web Researcher
   const testMessage = agentSystem.sendRequest(
-    AgentType.SUPERVISOR,
+    AgentType.LLM_ORCHESTRATOR,
     AgentType.WEB_RESEARCHER,
     'Test message for subscription',
     { test: true }
@@ -82,52 +82,52 @@ async function testAgentCommunication() {
   console.log('4. 测试多Agent通信场景:');
   
   // 模拟一个完整的通信流程
-  console.log('  场景: Supervisor协调多个Agent完成任务');
+  console.log('  场景: LLM-Orchestrator协调多个Agent完成任务');
   
-  // Supervisor发送任务给Web Researcher
+  // LLM-Orchestrator发送任务给Web Researcher
   const taskMessage = agentSystem.sendRequest(
-    AgentType.SUPERVISOR,
+    AgentType.LLM_ORCHESTRATOR,
     AgentType.WEB_RESEARCHER,
     'Research Sora model capabilities',
     { deadline: Date.now() + 60000 }
   );
-  console.log('  Supervisor -> Web Researcher:', taskMessage.content);
+  console.log('  LLM-Orchestrator -> Web Researcher:', taskMessage.content);
   
   // Web Researcher完成任务并响应
   const completionMessage = agentSystem.sendResponse(
     AgentType.WEB_RESEARCHER,
-    AgentType.SUPERVISOR,
+    AgentType.LLM_ORCHESTRATOR,
     'Research completed, found 10 sources',
     { sources: 10, quality: 'high' }
   );
-  console.log('  Web Researcher -> Supervisor:', completionMessage.content);
+  console.log('  Web Researcher -> LLM-Orchestrator:', completionMessage.content);
   
-  // Supervisor通知Long Text Collector分析结果
+  // LLM-Orchestrator通知Long Text Collector分析结果
   const analysisMessage = agentSystem.sendNotification(
-    AgentType.SUPERVISOR,
+    AgentType.LLM_ORCHESTRATOR,
     AgentType.LONG_TEXT_COLLECTOR,
     'Analyze the research results',
     { taskId: taskMessage.id }
   );
-  console.log('  Supervisor -> Long Text Collector:', analysisMessage.content);
+  console.log('  LLM-Orchestrator -> Long Text Collector:', analysisMessage.content);
   
   // Long Text Collector完成分析并响应
   const analysisResponse = agentSystem.sendResponse(
     AgentType.LONG_TEXT_COLLECTOR,
-    AgentType.SUPERVISOR,
+    AgentType.LLM_ORCHESTRATOR,
     'Analysis completed, found key insights',
     { insights: 5, confidence: 0.85 }
   );
-  console.log('  Long Text Collector -> Supervisor:', analysisResponse.content);
+  console.log('  Long Text Collector -> LLM-Orchestrator:', analysisResponse.content);
   
-  // Supervisor通知Synthesizer生成最终报告
+  // LLM-Orchestrator汇总最终报告
   const synthesisMessage = agentSystem.sendNotification(
-    AgentType.SUPERVISOR,
-    AgentType.SYNTHESIZER,
+    AgentType.LLM_ORCHESTRATOR,
+    AgentType.LLM_ORCHESTRATOR,
     'Generate final report',
     { insights: analysisResponse.metadata.insights }
   );
-  console.log('  Supervisor -> Synthesizer:', synthesisMessage.content);
+  console.log('  LLM-Orchestrator -> LLM-Orchestrator:', synthesisMessage.content);
   console.log('');
   
   // 5. 测试取消订阅
@@ -137,7 +137,7 @@ async function testAgentCommunication() {
   
   // 发送消息测试取消订阅是否生效
   const postUnsubscribeMessage = agentSystem.sendRequest(
-    AgentType.SUPERVISOR,
+    AgentType.LLM_ORCHESTRATOR,
     AgentType.WEB_RESEARCHER,
     'Message after unsubscribe',
     { test: true }

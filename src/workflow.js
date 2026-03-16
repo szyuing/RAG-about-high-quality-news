@@ -260,12 +260,12 @@ function createResearchWorkflow() {
   const workflow = new StateGraph();
 
   workflow.addNode("plan", async (state) => {
-    const supervisor = state.agentSystem.getAgent(AgentType.SUPERVISOR);
-    const plan = await supervisor.planTask(state.question, state.context);
+    const orchestrator = state.agentSystem.getAgent(AgentType.LLM_ORCHESTRATOR);
+    const plan = await orchestrator.planTask(state.question, state.context);
     return {
       state_patch: { plan },
       node_result: {
-        agent: AgentType.SUPERVISOR,
+        agent: AgentType.LLM_ORCHESTRATOR,
         type: "planning",
         summary: `Planned ${plan?.sub_questions?.length || 0} sub-questions.`,
         outputs: {
@@ -274,7 +274,7 @@ function createResearchWorkflow() {
         }
       },
       handoff: {
-        from: AgentType.SUPERVISOR,
+        from: AgentType.LLM_ORCHESTRATOR,
         to: AgentType.WEB_RESEARCHER,
         reason: "Research plan is ready for discovery.",
         artifact: "plan"
@@ -351,7 +351,7 @@ function createResearchWorkflow() {
       },
       handoff: {
         from: AgentType.FACT_VERIFIER,
-        to: AgentType.SYNTHESIZER,
+        to: AgentType.LLM_ORCHESTRATOR,
         reason: "Verified evidence is ready for synthesis.",
         artifact: "verificationResult"
       }
@@ -359,8 +359,8 @@ function createResearchWorkflow() {
   });
 
   workflow.addNode("synthesize", async (state) => {
-    const synthesizer = state.agentSystem.getAgent(AgentType.SYNTHESIZER);
-    const synthesisResult = await synthesizer.execute({
+    const orchestrator = state.agentSystem.getAgent(AgentType.LLM_ORCHESTRATOR);
+    const synthesisResult = await orchestrator.synthesizeAnswer({
       question: state.question,
       evidenceItems: state.analysisResult?.result?.reads || [],
       verification: state.verificationResult?.result,
@@ -374,9 +374,9 @@ function createResearchWorkflow() {
     return {
       state_patch: { synthesisResult },
       node_result: {
-        agent: AgentType.SYNTHESIZER,
+        agent: AgentType.LLM_ORCHESTRATOR,
         type: "synthesis",
-        summary: "Final answer assembled from verified evidence.",
+        summary: "LLM-Orchestrator assembled the final answer from verified evidence.",
         outputs: {
           headline: synthesisResult?.result?.headline || null
         }

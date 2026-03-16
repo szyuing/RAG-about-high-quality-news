@@ -202,6 +202,15 @@
     "verification": {...},
     "evaluation": {...},
     "scratchpad": {...},
+    "runtime": {
+      "capabilities": {
+        "tools": [...],
+        "state": [...],
+        "memory": [...],
+        "execution": [...]
+      }
+    },
+    "agent_runtime": {...},
     "telemetry": {...},
     "tool_memory": [...],
     "experience": {...},

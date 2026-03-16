@@ -5,7 +5,7 @@ const {
   dispatchAgentTask,
   completeAgentTask,
   failAgentTask
-} = require("./agent-runtime");
+} = require("./runtime");
 
 function dedupeBy(items, getKey) {
   const map = new Map();
@@ -394,7 +394,7 @@ async function runDocumentParsingTasks(candidate, telemetry, runtime, parentTask
     const toolId = toolResolution?.tool_id || preferredToolId;
     const runtimeTask = runtime
       ? dispatchAgentTask(runtime, {
-          from: "supervisor",
+          from: "llm_orchestrator",
           agentId: task.agent,
           taskType: `parse_document_${task.agent}`,
           input: {
@@ -603,7 +603,7 @@ async function runWebResearcher(plan, queries, telemetry, runtime = null) {
   const queryReports = await Promise.all(queries.map(async (query) => {
     const runtimeTask = runtime
       ? dispatchAgentTask(runtime, {
-          from: "supervisor",
+          from: "llm_orchestrator",
           agentId: "web_researcher",
           taskType: "discover_sources",
           input: { query, connector_ids: plan.chosen_connector_ids },
@@ -667,7 +667,7 @@ async function runSpecialistReads(selected, telemetry, runtime = null) {
           : "collect_long_text";
       const runtimeTask = runtime
         ? dispatchAgentTask(runtime, {
-            from: "supervisor",
+            from: "llm_orchestrator",
             agentId: agent,
             taskType,
             input: { candidate },
@@ -825,7 +825,7 @@ async function runFactVerifierReview(verification, telemetry, runtime = null) {
   const tasks = reviewItems.map(({ kind, item }) => {
     const runtimeTask = runtime
       ? dispatchAgentTask(runtime, {
-          from: "supervisor",
+          from: "llm_orchestrator",
           agentId: "fact_verifier",
           taskType: "review_evidence_consistency",
           input: {

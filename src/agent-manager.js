@@ -59,13 +59,13 @@ class AgentManager {
   evaluateAgentCapability(agent) {
     // 简单的能力评估，基于Agent类型和状态
     const baseCapability = {
+      llm_orchestrator: 10,
       web_researcher: 10,
       long_text_collector: 8,
       video_parser: 7,
       chart_parser: 8,
       table_parser: 8,
-      fact_verifier: 9,
-      synthesizer: 8
+      fact_verifier: 9
     };
 
     const base = baseCapability[agent.type] || 5;
@@ -158,8 +158,8 @@ class AgentManager {
       requirements.push({ type: 'fact_verifier', priority: 'high' });
     }
     
-    if (task.type === 'synthesis' || task.content.includes('summarize') || task.content.includes('report')) {
-      requirements.push({ type: 'synthesizer', priority: 'high' });
+    if (task.type === 'planning' || task.type === 'routing' || task.type === 'stop' || task.type === 'synthesis' || task.content.includes('summarize') || task.content.includes('report')) {
+      requirements.push({ type: 'llm_orchestrator', priority: 'high' });
     }
     
     // 默认需求

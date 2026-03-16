@@ -12,14 +12,13 @@ const AgentStatus = {
 };
 
 const AgentType = {
-  SUPERVISOR: "supervisor",
+  LLM_ORCHESTRATOR: "llm_orchestrator",
   WEB_RESEARCHER: "web_researcher",
   LONG_TEXT_COLLECTOR: "long_text_collector",
   VIDEO_PARSER: "video_parser",
   CHART_PARSER: "chart_parser",
   TABLE_PARSER: "table_parser",
   FACT_VERIFIER: "fact_verifier",
-  SYNTHESIZER: "synthesizer",
   TOOL_CREATOR: "tool_creator"
 };
 
@@ -155,11 +154,11 @@ class BaseAgent {
   }
 }
 
-class SupervisorAgent extends BaseAgent {
+class LLMOrchestratorAgent extends BaseAgent {
   constructor(config) {
     super({
       ...config,
-      type: AgentType.SUPERVISOR,
+      type: AgentType.LLM_ORCHESTRATOR,
       tools: []
     });
     this.taskQueue = [];
@@ -250,7 +249,6 @@ class SupervisorAgent extends BaseAgent {
       agents.push(AgentType.FACT_VERIFIER);
     }
 
-    agents.push(AgentType.SYNTHESIZER);
     return agents;
   }
 
@@ -268,6 +266,118 @@ class SupervisorAgent extends BaseAgent {
       plan: toolResults,
       tasks: this.taskQueue
     };
+  }
+
+  generateSynthesisMarkdownReport({ question, evidenceItems, verification, evaluation, agentReports }) {
+    const lines = [
+      `# Research Summary: ${question}`,
+      "",
+      "## Conclusion",
+      this.buildConclusion(question, evidenceItems || [], verification),
+      "",
+      `**Confidence**: ${(this.calculateConfidence(verification, evaluation) * 100).toFixed(0)}%`,
+      ""
+    ];
+
+    if (verification?.conflicts?.length) {
+      lines.push("## Conflicts");
+      for (const item of verification.conflicts) {
+        lines.push(`- ${item.claim || "Unknown claim"}`);
+      }
+      lines.push("");
+    }
+
+    if (evaluation?.risk_notes?.length) {
+      lines.push("## Risk Notes");
+      for (const note of evaluation.risk_notes) {
+        lines.push(`- ${note}`);
+      }
+      lines.push("");
+    }
+
+    if (agentReports?.length) {
+      lines.push("## Agent Reports");
+      for (const report of agentReports) {
+        lines.push(`### ${report.agent || report.agentId || "Agent"}`);
+        lines.push(report.markdown_report || report.summary || "");
+      }
+      lines.push("");
+    }
+
+    lines.push("## Sources");
+    for (const source of this.buildSourceList(evidenceItems || [])) {
+      lines.push(`- ${source.title} (${source.source_type})`);
+    }
+    lines.push("");
+
+    return lines.join("\n");
+  }
+
+  async synthesizeAnswer(input) {
+    this.status = AgentStatus.RUNNING;
+    this.startTime = Date.now();
+
+    try {
+      const { question, evidenceItems, verification, evaluation, agentReports } = input;
+      const keyClaims = this.extractKeyClaims(evidenceItems || []);
+      const conclusion = this.buildConclusion(question, evidenceItems || [], verification);
+      const confidence = this.calculateConfidence(verification, evaluation);
+
+      this.result = {
+        headline: `Research summary for "${question}"`,
+        conclusion,
+        key_claims: keyClaims,
+        confidence,
+        sources: this.buildSourceList(evidenceItems || []),
+        conflicts: verification?.conflicts || [],
+        uncertainty: evaluation?.risk_notes || [],
+        markdown_report: this.generateSynthesisMarkdownReport({ question, evidenceItems, verification, evaluation, agentReports })
+      };
+      this.status = AgentStatus.COMPLETED;
+    } catch (error) {
+      this.error = error;
+      this.status = AgentStatus.FAILED;
+      this.result = {
+        markdown_report: `# LLM-Orchestrator Report\n\n**Error**: ${error.message}`
+      };
+    }
+
+    this.endTime = Date.now();
+    return this.getResult();
+  }
+
+  extractKeyClaims(evidenceItems) {
+    const claims = [];
+    for (const item of evidenceItems || []) {
+      for (const claim of item.claims || []) {
+        claims.push({
+          claim: claim.claim,
+          source: item.source_id,
+          authority: item.source_metadata?.authority_score || 0.66
+        });
+      }
+    }
+    return claims.slice(0, 5);
+  }
+
+  buildConclusion(question, evidenceItems, verification) {
+    const supported = verification?.confirmations?.length || 0;
+    const conflicted = verification?.conflicts?.length || 0;
+    return `Research on "${question}" found ${evidenceItems.length} sources with ${supported} confirmations and ${conflicted} conflicts.`;
+  }
+
+  calculateConfidence(verification, evaluation) {
+    const base = evaluation?.is_sufficient ? 0.7 : 0.5;
+    const conflictPenalty = (verification?.conflicts?.length || 0) * 0.1;
+    return Math.max(0, Math.min(1, base - conflictPenalty));
+  }
+
+  buildSourceList(evidenceItems) {
+    return evidenceItems.map((item) => ({
+      source_id: item.source_id,
+      title: item.title,
+      source_type: item.source_type
+    }));
   }
 }
 
@@ -652,11 +762,11 @@ class FactVerifierAgent extends BaseAgent {
   }
 }
 
-class SynthesizerAgent extends BaseAgent {
+class FinalAnswerComposer extends BaseAgent {
   constructor(config) {
     super({
       ...config,
-      type: AgentType.SYNTHESIZER,
+      type: AgentType.LLM_ORCHESTRATOR,
       tools: []
     });
   }
@@ -733,7 +843,7 @@ class SynthesizerAgent extends BaseAgent {
       this.error = error;
       this.status = AgentStatus.FAILED;
       this.result = {
-        markdown_report: `# Synthesizer Agent 报告\n\n**错误**: ${error.message}`
+        markdown_report: `# Final Answer Composer Report\n\n**Error**: ${error.message}`
       };
     }
 
@@ -1019,8 +1129,8 @@ function createAgent(type, config = {}) {
   };
 
   switch (type) {
-    case AgentType.SUPERVISOR:
-      return new SupervisorAgent(baseConfig);
+    case AgentType.LLM_ORCHESTRATOR:
+      return new LLMOrchestratorAgent(baseConfig);
     case AgentType.WEB_RESEARCHER:
       return new WebResearcherAgent(baseConfig);
     case AgentType.LONG_TEXT_COLLECTOR:
@@ -1033,8 +1143,6 @@ function createAgent(type, config = {}) {
       return new TableParserAgent(baseConfig);
     case AgentType.FACT_VERIFIER:
       return new FactVerifierAgent(baseConfig);
-    case AgentType.SYNTHESIZER:
-      return new SynthesizerAgent(baseConfig);
     case AgentType.TOOL_CREATOR:
       return new ToolCreatorAgent(baseConfig);
     default:
@@ -1046,14 +1154,13 @@ module.exports = {
   AgentStatus,
   AgentType,
   BaseAgent,
-  SupervisorAgent,
+  LLMOrchestratorAgent,
   WebResearcherAgent,
   LongTextCollectorAgent,
   VideoParserAgent,
   ChartParserAgent,
   TableParserAgent,
   FactVerifierAgent,
-  SynthesizerAgent,
   ToolCreatorAgent,
   ToolCreatorPool,
   createAgent

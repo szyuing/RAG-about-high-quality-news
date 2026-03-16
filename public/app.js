@@ -24,14 +24,13 @@ const toolLabels = {
 };
 
 const agentLabels = {
-  supervisor: "Supervisor",
+  llm_orchestrator: "LLM-Orchestrator",
   web_researcher: "Web Researcher",
   video_parser: "Video Parser",
   long_text_collector: "Long Text Collector",
   chart_parser: "Chart Parser",
   table_parser: "Table Parser",
   fact_verifier: "Fact Verifier",
-  synthesizer: "Synthesizer",
   tool_creator: "Tool Creator"
 };
 
