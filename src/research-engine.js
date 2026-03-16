@@ -1,8 +1,26 @@
 const fs = require("fs");
 const path = require("path");
-const { samplePrompts, sourceCatalog, searchRealSources, readCandidate, __internal } = require("./source-connectors");
+const { samplePrompts, sourceCatalog, ToolRegistry, __internal } = require("./source-connectors");
+const { createEvidenceUnit } = require("./evidence-model");
+const {
+  synthesizeTool,
+  runEphemeralTool,
+  readToolMemory,
+  recordToolExperience
+} = require("./ephemeral-tooling");
+const {
+  createAgentRegistry,
+  routeCandidate,
+  selectCandidates,
+  runWebResearcher,
+  runSpecialistReads,
+  verifyEvidenceUnits,
+  evaluateResearch
+} = require("./agent-orchestrator");
 
 const experiencePath = path.join(__dirname, "..", "data", "experience-memory.json");
+const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
+const DEFAULT_PLANNER_MODEL = process.env.OPENAI_PLANNER_MODEL || "gpt-4o-mini";
 
 function normalizeText(value) {
   return String(value || "")
@@ -32,14 +50,10 @@ function dedupeBy(items, getKey) {
   return Array.from(map.values());
 }
 
-function average(values) {
-  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
-}
-
 function readExperienceMemory() {
   try {
     return JSON.parse(fs.readFileSync(experiencePath, "utf8"));
-  } catch (error) {
+  } catch (_) {
     return [];
   }
 }
@@ -54,6 +68,10 @@ function getSamples() {
 
 function getExperienceMemory() {
   return readExperienceMemory().slice(0, 8);
+}
+
+function getToolMemory() {
+  return readToolMemory();
 }
 
 function getSourceCapabilities() {
@@ -87,55 +105,315 @@ function buildEnglishQueryHints(question) {
 
 function buildSeedQueries(question) {
   const hints = buildEnglishQueryHints(question);
-  if (hints.length) {
-    return Array.from(new Set(hints)).slice(0, 4);
+  return Array.from(new Set([question, ...hints])).slice(0, 4);
+}
+
+function scoreConnectorRelevance(question, connector) {
+  const intentTokens = buildIntentTokens(question);
+  const blob = normalizeText([
+    connector.label,
+    connector.description,
+    ...(connector.capabilities || [])
+  ].join(" "));
+
+  let score = 0;
+  for (const token of intentTokens) {
+    if (blob.includes(normalizeText(token))) {
+      score += 1;
+    }
   }
-  return [question];
+
+  if (/[\u4e00-\u9fff]/.test(question) && /中文/.test((connector.capabilities || []).join(" "))) {
+    score += 2;
+  }
+  if (/最新|当前|现在|发布|动态|消息|新闻/.test(question) && /(新闻|动态|官方网页)/.test((connector.capabilities || []).join(" "))) {
+    score += 2;
+  }
+  if (/教程|上手|体验|测评|演示/.test(question) && /(教程|视频|社区)/.test((connector.capabilities || []).join(" "))) {
+    score += 2;
+  }
+  if (/论文|研究|paper|research/i.test(question) && /(论文|研究)/.test((connector.capabilities || []).join(" "))) {
+    score += 2;
+  }
+
+  return score;
+}
+
+function inferPreferredConnectors(question) {
+  return [...sourceCatalog]
+    .map((connector) => ({
+      id: connector.id,
+      label: connector.label,
+      reason: connector.description,
+      score: scoreConnectorRelevance(question, connector)
+    }))
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 4)
+    .map(({ id, label, reason }) => ({ id, label, reason }));
+}
+
+function chooseConnectorsForQuestion(question, preferredConnectors) {
+  const preferred = preferredConnectors || inferPreferredConnectors(question);
+  const chosen = preferred.map((item) => item.id).filter(Boolean);
+
+  if (!chosen.includes("bing_web")) {
+    chosen.push("bing_web");
+  }
+  if (chosen.length < 2 && sourceCatalog[0]?.id) {
+    chosen.push(sourceCatalog[0].id);
+  }
+
+  return Array.from(new Set(chosen)).slice(0, 4);
+}
+
+function buildStopPolicy(question, subQuestions) {
+  return {
+    min_source_types: 2,
+    min_evidence_items: 3,
+    max_rounds: 2,
+    overall_coverage_threshold: 0.18,
+    sub_question_coverage_threshold: 0.18,
+    fallback_sub_question_coverage_threshold: 0.12,
+    max_relevant_conflicts: 1,
+    require_all_sub_questions: true,
+    prefer_video_evidence: /视频|访谈|演讲|发布会|talk|video/i.test(question),
+    prefer_discussion_evidence: /(为什么|why|how)/i.test(question),
+    expected_sub_questions: subQuestions.length
+  };
+}
+
+function extractTextFromResponsePayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  if (typeof payload.output_text === "string" && payload.output_text.trim()) {
+    return payload.output_text.trim();
+  }
+
+  const chunks = [];
+  for (const item of payload.output || []) {
+    if (item?.type !== "message") {
+      continue;
+    }
+    for (const content of item.content || []) {
+      if (typeof content?.text === "string" && content.text.trim()) {
+        chunks.push(content.text.trim());
+      }
+    }
+  }
+  return chunks.join("\n").trim();
+}
+
+function normalizeModelConnectorIds(candidateIds, fallbackIds = []) {
+  const validIds = new Set(sourceCatalog.map((item) => item.id));
+  const selected = [];
+
+  for (const id of candidateIds || []) {
+    if (!validIds.has(id) || selected.includes(id)) {
+      continue;
+    }
+    selected.push(id);
+    if (selected.length >= 4) {
+      break;
+    }
+  }
+
+  for (const id of fallbackIds || []) {
+    if (!validIds.has(id) || selected.includes(id)) {
+      continue;
+    }
+    selected.push(id);
+    if (selected.length >= 4) {
+      break;
+    }
+  }
+
+  if (!selected.includes("bing_web") && validIds.has("bing_web") && selected.length < 4) {
+    selected.push("bing_web");
+  }
+
+  return selected.slice(0, 4);
+}
+
+async function requestConnectorPlanFromModel(question, basePlan) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return null;
+  }
+
+  const connectors = (basePlan.source_capabilities || []).map((item) => ({
+    id: item.id,
+    label: item.label,
+    description: item.description,
+    capabilities: item.capabilities || []
+  }));
+  const connectorIds = connectors.map((item) => item.id);
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      chosen_connector_ids: {
+        type: "array",
+        minItems: 1,
+        maxItems: 4,
+        uniqueItems: true,
+        items: { type: "string", enum: connectorIds }
+      },
+      rationale: { type: "string" },
+      connector_reasons: {
+        type: "array",
+        maxItems: 4,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string", enum: connectorIds },
+            reason: { type: "string" }
+          },
+          required: ["id", "reason"]
+        }
+      }
+    },
+    required: ["chosen_connector_ids", "rationale", "connector_reasons"]
+  };
+
+  const prompt = [
+    "Select the best information source connectors for a research question.",
+    "Choose only from the provided connectors.",
+    "Pick 2 to 4 connectors that are most likely to produce strong evidence for the question.",
+    "Prefer primary or official sources when relevant, but do not force diversity if the topic strongly points to a smaller set.",
+    "Question:",
+    question,
+    "",
+    "Available connectors:",
+    JSON.stringify(connectors, null, 2)
+  ].join("\n");
+
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    signal: AbortSignal.timeout(20000),
+    body: JSON.stringify({
+      model: DEFAULT_PLANNER_MODEL,
+      store: false,
+      input: prompt,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "connector_plan",
+          strict: true,
+          schema
+        }
+      }
+    })
+  });
+
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || `OpenAI planner failed with HTTP ${response.status}`);
+  }
+
+  const rawText = extractTextFromResponsePayload(payload);
+  if (!rawText) {
+    throw new Error("OpenAI planner returned no text output");
+  }
+
+  return JSON.parse(rawText);
+}
+
+function mergePlanWithModelSelection(basePlan, modelSelection) {
+  const fallbackIds = basePlan.chosen_connector_ids || basePlan.preferred_connectors.map((item) => item.id);
+  const chosenConnectorIds = normalizeModelConnectorIds(modelSelection?.chosen_connector_ids, fallbackIds);
+  const reasonMap = new Map((modelSelection?.connector_reasons || []).map((item) => [item.id, item.reason]));
+
+  const preferredConnectors = chosenConnectorIds
+    .map((id) => {
+      const source = (basePlan.source_capabilities || []).find((item) => item.id === id);
+      if (!source) {
+        return null;
+      }
+      return {
+        id,
+        label: source.label,
+        reason: reasonMap.get(id) || source.description
+      };
+    })
+    .filter(Boolean);
+
+  return {
+    ...basePlan,
+    preferred_connectors: preferredConnectors.length ? preferredConnectors : basePlan.preferred_connectors,
+    chosen_connector_ids: chosenConnectorIds,
+    planner_mode: "llm",
+    planner_rationale: modelSelection?.rationale || ""
+  };
 }
 
 function planner(question) {
   const comparisonQuery = /(相比|对比|差异|提升|versus|vs|update|更新)/i.test(question);
   const whyQuery = /(为什么|why|how)/i.test(question);
-
   const subQuestions = comparisonQuery
     ? [
-        "当前版本或当前状态是什么",
-        "历史基线或对照版本是什么",
-        "两者差异体现在哪些指标、能力或工作流上"
+        "当前版本或当前状态是什么？",
+        "历史基线或对照版本是什么？",
+        "两者差异体现在什么指标、能力或工作流上？"
       ]
     : [
-        "核心问题的直接答案是什么",
-        "哪些证据足以支撑这个答案"
+        "核心问题的直接答案是什么？",
+        "哪些证据足以支撑这个答案？"
       ];
 
   const requiredEvidence = [
-    "通用网页或官方页面",
-    "结构化长文或文档来源"
+    "至少 3 条高相关来源",
+    "至少覆盖 2 种不同形态的证据"
   ];
-
   if (/视频|访谈|演讲|发布会|talk|video|sora|iphone/i.test(question)) {
-    requiredEvidence.push("视频或多媒体转写");
+    requiredEvidence.push("优先补充视频或多媒体证据");
   }
   if (whyQuery) {
-    requiredEvidence.push("讨论或社区来源");
+    requiredEvidence.push("优先补充讨论或社区视角");
   }
 
-  const initialQueries = buildSeedQueries(question);
+  const preferredConnectors = inferPreferredConnectors(question);
+  const chosenConnectorIds = chooseConnectorsForQuestion(question, preferredConnectors);
 
   return {
     task_goal: question,
     sub_questions: subQuestions,
     required_evidence: requiredEvidence,
-    source_priority: [
-      { source_type: "web", reason: "优先找官方页、新闻页和权威长文。" },
-      { source_type: "document", reason: "补充论文、研究摘要和结构化背景资料。" },
-      { source_type: "video", reason: "补充 Talk、演讲或视频里的原始表述。" },
-      { source_type: "forum", reason: "用讨论型来源发现争议点和补充视角。" }
-    ],
+    source_strategy: "Supervisor selects connectors first, then dispatches candidates to specialist agents.",
+    preferred_connectors: preferredConnectors,
+    chosen_connector_ids: chosenConnectorIds,
     source_capabilities: sourceCatalog,
-    initial_queries: initialQueries,
-    stop_condition: "至少覆盖两类来源，并且核心子问题已经有证据支撑；若仍有冲突，需要明确标注不确定性。"
+    initial_queries: buildSeedQueries(question),
+    stop_policy: buildStopPolicy(question, subQuestions),
+    stop_condition: "Stop when core questions are covered by evidence from at least two source types and conflicts are disclosed."
   };
+}
+
+async function buildPlan(question) {
+  const basePlan = planner(question);
+  try {
+    const modelSelection = await requestConnectorPlanFromModel(question, basePlan);
+    if (!modelSelection) {
+      return {
+        ...basePlan,
+        planner_mode: "fallback",
+        planner_rationale: "OPENAI_API_KEY not configured"
+      };
+    }
+    return mergePlanWithModelSelection(basePlan, modelSelection);
+  } catch (error) {
+    return {
+      ...basePlan,
+      planner_mode: "fallback",
+      planner_rationale: `fallback: ${error.message}`
+    };
+  }
 }
 
 function createScratchpad(plan) {
@@ -147,374 +425,494 @@ function createScratchpad(plan) {
     temporary_conclusions: [],
     resolved_questions: [],
     missing_questions: [...plan.sub_questions],
-    failure_paths: []
+    failure_paths: [],
+    agent_reports: [],
+    stop_reason: null
   };
 }
 
-function routeCandidate(candidate) {
-  if (candidate.source_type === "video") {
-    return "multimedia";
-  }
-  if (candidate.source_type === "forum") {
-    return "fact_verifier";
-  }
-  return "deep_analyst";
+function buildEvidenceItems(reads, candidates = []) {
+  const candidateMap = new Map(candidates.map((item) => [item.id, item]));
+  return reads.map((item) => createEvidenceUnit(item, candidateMap.get(item.source_id)));
 }
 
-function selectCandidates(candidates) {
-  const sorted = [...candidates].sort((left, right) => right.score - left.score);
-  const selected = [];
-  const priorities = ["web", "video", "document", "forum"];
-
-  for (const type of priorities) {
-    const candidate = sorted.find((item) => item.source_type === type && !selected.some((picked) => picked.url === item.url));
-    if (candidate) {
-      selected.push(candidate);
-    }
-    if (selected.length >= 4) {
-      return selected;
-    }
+async function crossCheckFacts(input) {
+  if (!input?.length) {
+    return { confirmations: [], conflicts: [], coverage_gaps: [] };
   }
 
-  for (const candidate of sorted) {
-    if (selected.some((item) => item.url === candidate.url)) {
-      continue;
-    }
-    selected.push(candidate);
-    if (selected.length >= 4) {
-      break;
-    }
+  const evidenceItems = input[0]?.claims || input[0]?.source_metadata
+    ? input
+    : [{
+        source_id: "legacy",
+        source_type: "web",
+        claims: input.map((fact, index) => ({
+          id: `legacy:${index}`,
+          type: fact.kind,
+          claim: fact.claim,
+          subject: fact.subject,
+          value: fact.value,
+          unit: fact.unit,
+          source_id: fact.source_id,
+          published_at: fact.published_at || null,
+          authority_score: fact.authority_score || 0.66,
+          evidence_span_ids: []
+        })),
+        facts: input,
+        source_metadata: { authority_score: 0.66 }
+      }];
+
+  const execution = await ToolRegistry.executeTool("cross_check_facts", { evidenceItems });
+  if (!execution.success) {
+    throw new Error(execution.error?.message || "cross_check_facts failed");
   }
-
-  return selected;
-}
-
-function buildEvidenceItems(reads) {
-  return reads.map((item) => ({
-    source_id: item.source_id,
-    title: item.title,
-    source_type: item.source_type || (item.tool === "extract_video_intel" ? "video" : "web"),
-    key_points: item.key_points || item.timeline?.map((entry) => entry.summary) || [],
-    markdown: item.markdown || "",
-    timeline: item.timeline || [],
-    facts: (item.facts || []).map((fact) => ({ ...fact, source_id: item.source_id }))
-  }));
-}
-
-function scoreQuestionCoverage(question, evidenceItems) {
-  const tokens = buildIntentTokens(question);
-  if (!tokens.length) {
-    return 0;
-  }
-
-  let best = 0;
-  for (const item of evidenceItems) {
-    const blob = normalizeText([
-      item.title,
-      ...(item.key_points || []),
-      item.markdown || "",
-      ...((item.timeline || []).map((entry) => entry.summary)),
-      ...(item.facts || []).map((fact) => fact.claim)
-    ].join(" "));
-
-    const hits = tokens.filter((token) => blob.includes(token)).length;
-    best = Math.max(best, hits / tokens.length);
-  }
-  return best;
-}
-
-function crossCheckFacts(facts) {
-  const grouped = new Map();
-  for (const fact of facts) {
-    const key = `${fact.subject}:${fact.kind}:${fact.unit || ""}`;
-    const items = grouped.get(key) || [];
-    items.push(fact);
-    grouped.set(key, items);
-  }
-
-  const confirmations = [];
-  const conflicts = [];
-
-  for (const [key, items] of grouped.entries()) {
-    if (items.length < 2) {
-      confirmations.push({
-        key,
-        status: "single_source",
-        preferred_fact: items[0],
-        reason: "只有单一来源命中该数字事实。"
-      });
-      continue;
-    }
-
-    const uniqueValues = Array.from(new Set(items.map((item) => JSON.stringify(item.value))));
-    const preferredFact = [...items].sort((left, right) => {
-      const leftScore = left.authority_score || 0;
-      const rightScore = right.authority_score || 0;
-      return rightScore - leftScore;
-    })[0];
-
-    if (uniqueValues.length === 1) {
-      confirmations.push({
-        key,
-        status: "confirmed",
-        preferred_fact: preferredFact,
-        reason: "多个来源给出了相同数字。"
-      });
-    } else {
-      conflicts.push({
-        key,
-        status: "conflict",
-        candidates: items,
-        preferred_fact: preferredFact,
-        reason: "多个来源给出了不同数字，需要保留争议和来源差异。"
-      });
-    }
-  }
-
-  return { confirmations, conflicts };
+  return execution.data;
 }
 
 function evaluator(plan, scratchpad, evidenceItems, verification, roundsCompleted) {
-  const sourceTypesCovered = new Set(scratchpad.sources_read.map((item) => item.source_type));
-  const intentTokens = buildIntentTokens(plan.task_goal);
-  const overallCoverage = scoreQuestionCoverage(plan.task_goal, evidenceItems);
-  const hasEnoughDiversity = sourceTypesCovered.size >= 2;
-  const hasEnoughEvidence = evidenceItems.length >= 3;
-  const resolvedQuestions = [];
-  const missingQuestions = [];
-
-  if (overallCoverage >= 0.18 && hasEnoughDiversity && hasEnoughEvidence) {
-    resolvedQuestions.push(...plan.sub_questions);
-  } else {
-    for (const question of plan.sub_questions) {
-      const coverage = scoreQuestionCoverage(`${plan.task_goal} ${question}`, evidenceItems);
-      if (coverage >= 0.18 || (hasEnoughEvidence && coverage >= 0.12)) {
-        resolvedQuestions.push(question);
-      } else {
-        missingQuestions.push(question);
-      }
-    }
-  }
-
-  const relevantConflicts = verification.conflicts.filter((item) => {
-    const blob = normalizeText(item.preferred_fact?.claim || item.key || "");
-    if (!intentTokens.length) {
-      return true;
-    }
-    return intentTokens.filter((token) => blob.includes(token)).length >= 1;
-  });
-  const hardConflict = relevantConflicts.length >= 2;
-  const isSufficient = missingQuestions.length === 0 && hasEnoughDiversity && hasEnoughEvidence && !hardConflict;
-
-  return {
-    is_sufficient: isSufficient,
-    resolved_questions: resolvedQuestions,
-    missing_questions: missingQuestions,
-    risk_notes: [
-      ...(!hasEnoughDiversity ? ["来源类型仍不够丰富。"] : []),
-      ...(relevantConflicts.length ? ["存在数字或版本冲突，需要在结论里明确标注。"] : [])
-    ],
-    next_best_action: isSufficient
-      ? "synthesize_answer"
-      : roundsCompleted >= 2
-        ? "stop_with_partial_answer"
-        : "run_follow_up_search",
-    reason: isSufficient
-      ? "核心子问题已经被两类以上来源覆盖。"
-      : "仍有子问题证据不足，或者来源类型不够，或者存在尚未收敛的冲突。"
-  };
+  return evaluateResearch(plan, scratchpad, evidenceItems, verification, roundsCompleted);
 }
 
 function formatFact(fact) {
   if (typeof fact.value === "number") {
-    return `${fact.claim}（${fact.value} ${fact.unit || ""}）`.trim();
+    return `${fact.claim} (${fact.value} ${fact.unit || ""})`.trim();
   }
   return fact.claim;
 }
 
-function synthesize(question, mode, candidates, reads, verification, evaluation) {
-  const evidenceItems = buildEvidenceItems(reads);
-  const allFacts = evidenceItems.flatMap((item) => item.facts);
-  const intentTokens = buildIntentTokens(question);
-  const relevantConflicts = verification.conflicts.filter((item) => {
-    const blob = normalizeText(item.preferred_fact?.claim || item.key || "");
-    if (!intentTokens.length) {
-      return true;
-    }
-    return intentTokens.filter((token) => blob.includes(token)).length >= 1;
-  });
-  const preferredFacts = [
-    ...verification.confirmations.map((entry) => entry.preferred_fact),
-    ...relevantConflicts.map((entry) => entry.preferred_fact)
-  ].filter(Boolean);
-  const factLines = dedupeBy(preferredFacts.length ? preferredFacts : allFacts, (fact) => `${fact.subject}:${fact.kind}:${fact.claim}`)
-    .filter((fact) => {
-      if (!intentTokens.length) {
-        return true;
-      }
-      const blob = normalizeText(fact.claim);
-      return intentTokens.filter((token) => blob.includes(token)).length >= 1;
-    })
-    .slice(0, 4)
-    .map(formatFact);
+function buildEphemeralToolGoal(question, candidate, failure) {
+  const contentType = candidate.content_type || candidate.source_type || "web";
+  return `Extract usable ${contentType} evidence for the research question "${question}" after the built-in ${failure.agent} read path failed.`;
+}
 
-  const evidenceHighlights = reads
-    .slice(0, 4)
-    .map((item) => {
-      const highlights = item.key_points || item.timeline?.map((entry) => entry.summary) || [];
-      return {
-        title: item.title,
-        source_type: item.tool === "extract_video_intel" ? "video" : "web",
-        highlight: (highlights[0] || "该来源提供了与问题直接相关的正文或转写。").slice(0, 220)
-      };
+function buildEphemeralToolConstraints(candidate, failure) {
+  return [
+    "Use no third-party dependencies.",
+    "Prefer direct extraction from the target page or embedded payloads.",
+    "Return structured JSON with logs and extracted_data.",
+    `Original failure: ${failure.error.message}`,
+    `Target connector: ${candidate.connector || "unknown"}`
+  ];
+}
+
+function createReadFromEphemeralAttempt(candidate, attempt) {
+  const data = attempt.extracted_data || {};
+  const contentType = candidate.content_type || candidate.source_type || "web";
+  const paragraphs = data.paragraphs || [];
+  const timeline = data.timeline || [];
+  const keyPoints = data.key_points || paragraphs.slice(0, 4);
+  const markdown = data.markdown || [
+    `# ${data.title || candidate.title || "Ephemeral extraction"}`,
+    data.description || "",
+    ...paragraphs
+  ].filter(Boolean).join("\n\n");
+
+  return {
+    source_id: candidate.id,
+    content_type: contentType,
+    source_type: contentType,
+    tool: "run_ephemeral_tool",
+    title: data.title || candidate.title,
+    url: candidate.url,
+    author: data.author || candidate.author,
+    published_at: data.published_at || candidate.published_at || null,
+    duration: data.duration || null,
+    markdown,
+    transcript: data.transcript || [],
+    timeline,
+    key_points: keyPoints,
+    key_frames: data.key_frames || timeline.slice(0, 3).map((item) => item.summary || item.title),
+    facts: []
+  };
+}
+
+async function attemptEphemeralFallbacks(question, failures, telemetry, onProgress) {
+  const attempts = [];
+  const recoveredReads = [];
+  const recoveredEvidence = [];
+
+  for (const failure of failures.slice(0, 2)) {
+    const tool = await synthesizeTool({
+      goal: buildEphemeralToolGoal(question, failure.candidate, failure),
+      target: {
+        url: failure.candidate.url,
+        title: failure.candidate.title,
+        platform: failure.candidate.platform,
+        connector: failure.candidate.connector,
+        content_type: failure.candidate.content_type || failure.candidate.source_type
+      },
+      constraints: buildEphemeralToolConstraints(failure.candidate, failure)
     });
 
-  const quickAnswerParts = [
-    `针对“${question}”，系统完成了 ${reads.length} 条深读/转写和 ${candidates.length} 条候选筛选。`,
-    factLines.length
-      ? `当前最强的结构化证据包括：${factLines.join("；")}`
-      : `当前高价值来源的结论集中在：${evidenceHighlights.map((item) => `${item.title} 指向“${item.highlight}”`).join("；")}`
-  ];
+    const execution = await runEphemeralTool(tool, {
+      timeout_ms: 15000,
+      network: true
+    });
 
-  if (relevantConflicts.length) {
-    quickAnswerParts.push(`同时检测到 ${relevantConflicts.length} 处冲突，已在结论中保留不确定性。`);
+    const attempt = {
+      ...execution,
+      target: tool.target,
+      source_id: failure.candidate.id,
+      original_failure: failure.error.message
+    };
+    attempts.push(attempt);
+    telemetry.ephemeral_tools.push(attempt);
+    if (!execution.success) {
+      telemetry.failures.push({
+        stage: "run_ephemeral_tool",
+        query: tool.target?.url || tool.target?.title || tool.tool_id,
+        connector: tool.target?.connector || null,
+        reason: execution.error || "ephemeral tool failed"
+      });
+    }
+
+    await emitProgress(onProgress, {
+      type: "tool",
+      tool_attempt: {
+        tool_id: tool.tool_id,
+        strategy: tool.strategy,
+        target: tool.target,
+        success: execution.success,
+        worth_promoting: execution.worth_promoting,
+        logs: execution.logs,
+        error: execution.error
+      }
+    });
+
+    if (!execution.success) {
+      continue;
+    }
+
+    const read = createReadFromEphemeralAttempt(failure.candidate, execution);
+    recoveredReads.push(read);
+    recoveredEvidence.push(createEvidenceUnit(read, failure.candidate));
   }
 
   return {
+    attempts,
+    reads: recoveredReads,
+    evidence_items: recoveredEvidence
+  };
+}
+
+function synthesize(question, mode, candidates, reads, evidenceItems, verification, evaluation, telemetry) {
+  const keyClaims = dedupeBy(
+    evidenceItems.flatMap((item) => item.claims || []),
+    (claim) => `${claim.subject || "claim"}:${claim.type || "statement"}:${claim.claim}`
+  )
+    .slice(0, 5)
+    .map(formatFact);
+
+  const conclusion = [
+    `Question: ${question}`,
+    `Collected ${reads.length} normalized reads from ${candidates.length} candidate sources.`,
+    keyClaims.length ? `Top supported claims: ${keyClaims.join(" | ")}` : "Structured support is still thin; qualitative evidence dominates."
+  ].join(" ");
+
+  return {
     mode,
-    headline: `深度网页研究台对问题“${question}”的研究摘要`,
-    quick_answer: quickAnswerParts.join(" "),
+    headline: `Research summary for "${question}"`,
+    quick_answer: conclusion,
     deep_research_summary: {
-      headline: `深度网页研究台对问题“${question}”的研究摘要`,
-      conclusion: quickAnswerParts.join(" "),
-      evidence_chain: reads.map((item) => ({
+      headline: `Research summary for "${question}"`,
+      conclusion,
+      key_sources: evidenceItems.slice(0, 4).map((item) => ({
         source_id: item.source_id,
         title: item.title,
-        source_type: item.tool === "extract_video_intel" ? "video" : "web",
-        why_it_matters: (item.key_points || item.timeline?.map((entry) => entry.summary) || ["提供了直接证据。"])[0]
+        source_type: item.source_type,
+        source_metadata: item.source_metadata
       })),
-      conflicts: relevantConflicts.map((item) => ({
+      evidence_chain: evidenceItems.map((item) => ({
+        source_id: item.source_id,
+        title: item.title,
+        source_type: item.source_type,
+        why_it_matters: (item.key_points || [])[0] || item.quotes[0]?.text || "Provides direct evidence",
+        quotes: item.quotes.slice(0, 2),
+        evidence_spans: item.evidence_spans.slice(0, 3),
+        source_metadata: item.source_metadata
+      })),
+      conflicts: verification.conflicts.map((item) => ({
         key: item.key,
         preferred_claim: item.preferred_fact?.claim,
-        reason: item.reason
+        preferred_source: item.comparison?.preferred_source,
+        reason: item.reason,
+        competing_sources: item.comparison?.competing_sources || []
       })),
       uncertainty: evaluation.risk_notes.length
         ? evaluation.risk_notes
-        : ["当前结果已来自真实来源，但仍应继续扩展更多权威连接器。"],
-      confidence: Number(Math.max(0.35, Math.min(0.92, average(candidates.map((item) => item.authority_score || 0.66)))).toFixed(2))
+        : ["No major unresolved evidence gaps were detected."],
+      confidence: (() => {
+        const baseScore = evaluation.is_sufficient ? 0.58 : 0.38;
+        const diversityBonus = Math.min(0.15, ((evaluation.metrics?.source_types_covered || 0) / 4) * 0.15);
+        const total = verification.confirmations.length + verification.conflicts.length + verification.coverage_gaps.length;
+        const confirmationBonus = total > 0 ? (verification.confirmations.length / total) * 0.2 : 0;
+        return Number(Math.min(0.94, baseScore + diversityBonus + confirmationBonus).toFixed(2));
+      })(),
+      dynamic_tools: telemetry.ephemeral_tools.map((item) => ({
+        tool_id: item.tool.tool_id,
+        strategy: item.tool.strategy,
+        target: item.target,
+        success: item.success,
+        logs: item.logs,
+        worth_promoting: item.worth_promoting
+      })),
+      task_observability: {
+        stop_reason: telemetry.stop_reason,
+        connector_health: telemetry.connector_health,
+        failures: telemetry.failures.slice(0, 8)
+      }
     }
   };
 }
 
-function summarizeExperience(question, scratchpad, plan, evaluation) {
+function summarizeExperience(question, scratchpad, plan, evaluation, telemetry) {
+  const usefulPlatforms = [];
+  const effectiveSearchTerms = [];
+  const primarySourceSites = [];
+  const efficientToolCombinations = [];
+  const noisyPaths = [];
+
+  // 分析平台适用性
+  if (scratchpad.sources_read.length > 0) {
+    const platformStats = {};
+    scratchpad.sources_read.forEach(item => {
+      const platform = item.source_type || item.content_type || 'unknown';
+      platformStats[platform] = (platformStats[platform] || 0) + 1;
+    });
+    Object.entries(platformStats)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .forEach(([platform, count]) => {
+        usefulPlatforms.push(`${platform} (${count} sources)`);
+      });
+  }
+
+  // 分析有效搜索词
+  if (scratchpad.queries_tried.length > 0) {
+    const queryStats = {};
+    scratchpad.queries_tried.forEach(query => {
+      queryStats[query] = (queryStats[query] || 0) + 1;
+    });
+    Object.entries(queryStats)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .forEach(([query, count]) => {
+        effectiveSearchTerms.push(`${query} (${count} times)`);
+      });
+  }
+
+  // 分析一手资料站点
+  if (scratchpad.sources_read.length > 0) {
+    const siteStats = {};
+    scratchpad.sources_read.forEach(item => {
+      const site = item.source_id || item.title || 'unknown';
+      siteStats[site] = (siteStats[site] || 0) + 1;
+    });
+    Object.entries(siteStats)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .forEach(([site, count]) => {
+        primarySourceSites.push(`${site} (${count} times)`);
+      });
+  }
+
+  // 分析工具组合效率
+  if (scratchpad.agent_reports.length > 0) {
+    const toolStats = {};
+    scratchpad.agent_reports.forEach(report => {
+      if (report.tool) {
+        toolStats[report.tool] = (toolStats[report.tool] || 0) + 1;
+      }
+    });
+    Object.entries(toolStats)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .forEach(([tool, count]) => {
+        efficientToolCombinations.push(`${tool} (${count} times)`);
+      });
+  }
+
+  // 分析噪音路径
+  if (scratchpad.failure_paths.length > 0) {
+    scratchpad.failure_paths.slice(0, 3).forEach(path => {
+      noisyPaths.push(path.reason || path.message || 'Unknown failure');
+    });
+  }
+
   return {
     created_at: new Date().toISOString(),
     question,
     useful_queries: scratchpad.queries_tried.slice(0, 5),
-    useful_source_types: Array.from(new Set(scratchpad.sources_read.map((item) => item.source_type))),
+    useful_source_types: Array.from(new Set(scratchpad.sources_read.map((item) => item.content_type || item.source_type))),
+    useful_platforms: usefulPlatforms,
+    effective_search_terms: effectiveSearchTerms,
+    primary_source_sites: primarySourceSites,
+    efficient_tool_combinations: efficientToolCombinations,
+    ephemeral_tool_insights: {
+      attempts: telemetry?.ephemeral_tools?.length || 0,
+      recovered_sources: (telemetry?.ephemeral_tools || []).filter((item) => item.success).map((item) => item.target?.url).filter(Boolean),
+      promote_candidates: (telemetry?.ephemeral_tools || [])
+        .filter((item) => item.worth_promoting?.should_promote)
+        .map((item) => ({
+          site: item.worth_promoting.candidate_connector,
+          strategy: item.tool.strategy,
+          reason: item.worth_promoting.reason
+        }))
+    },
+    noisy_paths: noisyPaths,
     note: evaluation.is_sufficient
-      ? `该问题在当前版本中适合优先走 ${plan.source_priority.map((item) => item.source_type).slice(0, 3).join(" + ")} 的组合路径。`
-      : "该问题在当前真实接入层里仍有缺口，后续应补更强的网页搜索、官方源解析和视频平台接入。"
+      ? "This question is a good fit for the current supervisor-plus-specialists workflow."
+      : "This question still exposes connector or evidence-model gaps that should be improved."
   };
 }
 
-async function runRound(queries, scratchpad) {
-  const pool = [];
-
-  for (const query of queries) {
-    scratchpad.queries_tried.push(query);
-    try {
-      const candidates = await searchRealSources(query);
-      if (!candidates.length) {
-        scratchpad.failure_paths.push({ query, reason: "没有从真实来源拿到候选结果。" });
-      }
-      pool.push(...candidates);
-    } catch (error) {
-      scratchpad.failure_paths.push({ query, reason: error.message });
-    }
-  }
-
-  const uniqueCandidates = dedupeBy(pool, (item) => item.url).sort((left, right) => right.score - left.score);
-  const selected = selectCandidates(uniqueCandidates);
-  const reads = [];
-  const routedTasks = [];
-
-  for (const candidate of selected) {
-    const agent = routeCandidate(candidate);
-    const tool = candidate.source_type === "video" ? "extract_video_intel" : "deep_read_page";
-    routedTasks.push({ source_id: candidate.id, agent, tool, connector: candidate.connector });
-
-    try {
-      const readResult = await readCandidate(candidate);
-      reads.push(readResult);
-      scratchpad.sources_read.push({
-        source_id: candidate.id,
-        title: candidate.title,
-        source_type: candidate.source_type,
-        connector: candidate.connector,
-        tool
-      });
-    } catch (error) {
-      scratchpad.failure_paths.push({
-        query: candidate.url,
-        reason: `${candidate.connector} read failed: ${error.message}`
-      });
-    }
-  }
-
-  return {
-    candidates: uniqueCandidates,
-    selected,
-    routed_tasks: routedTasks,
-    reads
-  };
-}
-
-function buildFollowUpQueries(question, evaluation) {
+function buildFollowUpQueries(question, evaluation, scratchpad) {
   if (!evaluation?.missing_questions?.length) {
     return [];
   }
+
+  const failureCount = (scratchpad?.failure_paths || []).length;
+  const triedCount = (scratchpad?.queries_tried || []).length;
+  if (triedCount > 0 && failureCount / triedCount > 0.5) {
+    return buildEnglishQueryHints(question)
+      .filter(Boolean)
+      .filter((item, index, list) => list.indexOf(item) === index)
+      .slice(0, 3);
+  }
+
   return evaluation.missing_questions
-    .flatMap((item) => buildEnglishQueryHints(`${question} ${item}`))
+    .flatMap((item) => {
+      const followUp = `${question} ${item}`;
+      return [followUp, ...buildEnglishQueryHints(followUp)];
+    })
+    .filter(Boolean)
+    .filter((item, index, list) => list.indexOf(item) === index)
     .slice(0, 3);
 }
 
-async function runResearch({ question, mode }) {
-  const plan = planner(question);
+async function emitProgress(onProgress, payload) {
+  if (typeof onProgress !== "function") {
+    return;
+  }
+
+  try {
+    await onProgress(payload);
+  } catch (error) {
+    console.warn(`[runResearch] progress callback failed for "${payload?.type || "unknown"}":`, error.message);
+  }
+}
+
+async function runRound(plan, question, queries, scratchpad, telemetry, onProgress) {
+  scratchpad.queries_tried.push(...queries);
+  const candidates = await runWebResearcher(plan, queries, telemetry);
+  if (!candidates.length) {
+    for (const query of queries) {
+      scratchpad.failure_paths.push({ query, reason: "no candidate returned" });
+    }
+  }
+
+  const selected = selectCandidates(candidates, question, plan);
+  const routedTasks = selected.map((candidate) => {
+    const agent = routeCandidate(candidate);
+    const contentType = candidate.content_type || candidate.source_type;
+    return {
+      source_id: candidate.id,
+      agent,
+      tool: contentType === "video" ? "extract_video_intel" : "deep_read_page",
+      connector: candidate.connector
+    };
+  });
+
+  const specialistReads = await runSpecialistReads(selected, telemetry);
+  const reads = specialistReads.results.map((item) => item.read);
+  const evidenceItems = specialistReads.results.map((item) => item.evidence_unit);
+  const fallback = await attemptEphemeralFallbacks(question, specialistReads.failures, telemetry, onProgress);
+
+  for (const candidate of selected) {
+    const contentType = candidate.content_type || candidate.source_type;
+    scratchpad.sources_read.push({
+      source_id: candidate.id,
+      title: candidate.title,
+      content_type: contentType,
+      source_type: contentType,
+      connector: candidate.connector
+    });
+  }
+
+  return {
+    candidates,
+    selected,
+    routed_tasks: routedTasks,
+    reads: [...reads, ...fallback.reads],
+    evidence_items: [...evidenceItems, ...fallback.evidence_items],
+    tool_attempts: fallback.attempts
+  };
+}
+
+async function runResearch({ question, mode, onProgress }) {
+  const plan = await buildPlan(question);
+  await emitProgress(onProgress, { type: "plan", plan });
+
   const scratchpad = createScratchpad(plan);
+  const telemetry = {
+    agents: createAgentRegistry(),
+    events: [],
+    failures: [],
+    ephemeral_tools: [],
+    connector_health: {},
+    stop_reason: null
+  };
+
   const rounds = [];
   let combinedCandidates = [];
   let combinedReads = [];
-  let verification = { confirmations: [], conflicts: [] };
+  let combinedEvidence = [];
+  let verification = { confirmations: [], conflicts: [], coverage_gaps: [] };
   let evaluation = null;
 
-  for (let index = 0; index < 2; index += 1) {
-    const queries = index === 0 ? plan.initial_queries : buildFollowUpQueries(question, evaluation);
+  const maxRounds = Math.max(1, plan.stop_policy?.max_rounds || 2);
+  for (let index = 0; index < maxRounds; index += 1) {
+    const queries = index === 0 ? plan.initial_queries : buildFollowUpQueries(question, evaluation, scratchpad);
     if (!queries.length) {
       break;
     }
 
-    const round = await runRound(queries, scratchpad);
+    const round = await runRound(plan, question, queries, scratchpad, telemetry, onProgress);
     combinedCandidates = dedupeBy([...combinedCandidates, ...round.candidates], (item) => item.url).sort((left, right) => right.score - left.score);
     combinedReads = dedupeBy([...combinedReads, ...round.reads], (item) => item.source_id);
+    combinedEvidence = dedupeBy([...combinedEvidence, ...round.evidence_items], (item) => item.source_id);
 
-    const evidenceItems = buildEvidenceItems(combinedReads);
-    const facts = evidenceItems.flatMap((item) => item.facts);
-    scratchpad.facts_collected = facts;
-    verification = crossCheckFacts(facts);
-    scratchpad.conflicts_found = verification.conflicts;
-    evaluation = evaluator(plan, scratchpad, evidenceItems, verification, index + 1);
-    scratchpad.resolved_questions = evaluation.resolved_questions;
-    scratchpad.missing_questions = evaluation.missing_questions;
+    verification = await crossCheckFacts(combinedEvidence);
+    evaluation = evaluator(plan, scratchpad, combinedEvidence, verification, index + 1);
 
-    rounds.push({
+    scratchpad.agent_reports.push({
+      round: index + 1,
+      supervisor: {
+        queries,
+        dispatched_tasks: round.routed_tasks
+      },
+      fact_verifier: {
+        conflict_count: verification.conflicts.length,
+        single_source_claims: verification.coverage_gaps.length
+      },
+      ephemeral_tools: round.tool_attempts.map((item) => ({
+        strategy: item.tool.strategy,
+        success: item.success,
+        target: item.target?.url || item.target?.title || "unknown target"
+      }))
+    });
+    scratchpad.facts_collected = combinedEvidence.flatMap((item) => item.facts || []);
+
+    const roundSummary = {
       round: index + 1,
       queries,
+      chosen_connector_ids: plan.chosen_connector_ids,
       candidates_returned: round.candidates.length,
       selected_sources: round.selected.map((item) => ({
         id: item.id,
         title: item.title,
-        source_type: item.source_type,
+        content_type: item.content_type || item.source_type,
+        source_type: item.content_type || item.source_type,
         connector: item.connector
       })),
       routed_tasks: round.routed_tasks,
@@ -522,10 +920,32 @@ async function runResearch({ question, mode }) {
         is_sufficient: evaluation.is_sufficient,
         next_best_action: evaluation.next_best_action,
         missing_questions: evaluation.missing_questions
+      },
+      tool_attempts: round.tool_attempts.map((item) => ({
+        strategy: item.tool.strategy,
+        success: item.success,
+        target: item.target?.url || item.target?.title || "unknown target"
+      })),
+      agent_reports: scratchpad.agent_reports[scratchpad.agent_reports.length - 1]
+    };
+    rounds.push(roundSummary);
+
+    await emitProgress(onProgress, {
+      type: "round",
+      round: roundSummary,
+      totals: {
+        candidates: combinedCandidates.length,
+        reads: combinedReads.length
       }
+    });
+    await emitProgress(onProgress, {
+      type: "evaluation",
+      round: index + 1,
+      evaluation
     });
 
     if (evaluation.is_sufficient) {
+      telemetry.stop_reason = "stop_policy_satisfied";
       break;
     }
   }
@@ -535,14 +955,52 @@ async function runResearch({ question, mode }) {
       is_sufficient: false,
       resolved_questions: [],
       missing_questions: plan.sub_questions,
-      risk_notes: ["当前未从真实来源拿到足够结果。"],
+      risk_notes: ["No usable evidence was returned from the configured source connectors."],
       next_best_action: "manual_review",
-      reason: "搜索阶段没有成功返回可用候选。"
+      reason: "discovery returned no usable candidates",
+      metrics: {
+        source_types_covered: 0,
+        evidence_units: 0,
+        overall_coverage: 0,
+        conflict_count: 0,
+        single_source_claims: 0
+      }
+    };
+    telemetry.stop_reason = "no_usable_candidates";
+    await emitProgress(onProgress, {
+      type: "evaluation",
+      round: rounds.length,
+      evaluation
+    });
+  }
+
+  if (!telemetry.stop_reason) {
+    telemetry.stop_reason = evaluation.next_best_action === "stop_with_partial_answer"
+      ? "max_rounds_reached"
+      : "completed";
+  }
+
+  scratchpad.stop_reason = telemetry.stop_reason;
+  for (const connectorId of plan.chosen_connector_ids) {
+    const failures = telemetry.failures.filter((item) => item.connector === connectorId || item.stage === "discover");
+    telemetry.connector_health[connectorId] = {
+      failed_events: failures.length,
+      healthy: failures.length < Math.max(2, rounds.length + 1)
     };
   }
 
-  const finalAnswer = synthesize(question, mode, combinedCandidates, combinedReads, verification, evaluation);
-  const experience = summarizeExperience(question, scratchpad, plan, evaluation);
+  await emitProgress(onProgress, {
+    type: "synthesizing",
+    counts: {
+      rounds: rounds.length,
+      candidates: combinedCandidates.length,
+      reads: combinedReads.length
+    }
+  });
+
+  const finalAnswer = synthesize(question, mode, combinedCandidates, combinedReads, combinedEvidence, verification, evaluation, telemetry);
+  const experience = summarizeExperience(question, scratchpad, plan, evaluation, telemetry);
+  const toolMemory = recordToolExperience(telemetry.ephemeral_tools);
   const memory = readExperienceMemory();
   writeExperienceMemory([experience, ...memory].slice(0, 30));
 
@@ -553,9 +1011,12 @@ async function runResearch({ question, mode }) {
     rounds,
     candidates: combinedCandidates.slice(0, 12),
     reads: combinedReads,
+    evidence: combinedEvidence,
     verification,
     evaluation,
     scratchpad,
+    telemetry,
+    tool_memory: toolMemory,
     experience,
     final_answer: finalAnswer
   };
@@ -565,5 +1026,22 @@ module.exports = {
   runResearch,
   getSamples,
   getExperienceMemory,
-  getSourceCapabilities
+  getToolMemory,
+  getSourceCapabilities,
+  synthesizeTool,
+  runEphemeralTool,
+  __internal: {
+    inferPreferredConnectors,
+    chooseConnectorsForQuestion,
+    buildStopPolicy,
+    extractTextFromResponsePayload,
+    normalizeModelConnectorIds,
+    mergePlanWithModelSelection,
+    buildPlan,
+    planner,
+    buildEvidenceItems,
+    crossCheckFacts,
+    evaluator,
+    routeCandidate
+  }
 };
