@@ -1,17 +1,16 @@
 const fs = require('fs');
 const path = require('path');
+const { ensureDirectoryExists, resolveStateDir } = require("./data-paths");
 
 class StatePersistence {
-  constructor(storagePath = './data') {
+  constructor(storagePath = resolveStateDir()) {
     this.storagePath = storagePath;
     this.ensureDirectoryExists();
   }
 
   // 确保存储目录存在
   ensureDirectoryExists() {
-    if (!fs.existsSync(this.storagePath)) {
-      fs.mkdirSync(this.storagePath, { recursive: true });
-    }
+    ensureDirectoryExists(this.storagePath);
   }
 
   // 保存状态

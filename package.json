@@ -5,6 +5,6 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node --test --test-isolation=none"
+    "test": "node scripts/run-node-tests.js"
   }
 }

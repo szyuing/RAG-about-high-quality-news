@@ -3,8 +3,9 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
+const { ensureDirectoryExists, resolveDataFile } = require("./data-paths");
 
-const toolMemoryPath = path.join(__dirname, "..", "data", "ephemeral-tool-memory.json");
+const toolMemoryPath = resolveDataFile("ephemeral-tool-memory.json", "OPENSEARCH_TOOL_MEMORY_PATH");
 
 function makeToolId(prefix, value) {
   return `${prefix}:${crypto.createHash("sha1").update(String(value)).digest("hex").slice(0, 12)}`;
@@ -462,6 +463,7 @@ function readToolMemory(memoryPath = toolMemoryPath) {
 }
 
 function writeToolMemory(memory, memoryPath = toolMemoryPath) {
+  ensureDirectoryExists(path.dirname(memoryPath));
   fs.writeFileSync(memoryPath, JSON.stringify(memory, null, 2));
 }
 

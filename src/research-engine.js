@@ -1,8 +1,8 @@
 const fs = require("fs");
-const path = require("path");
 const { samplePrompts, sourceCatalog, ToolRegistry, __internal } = require("./source-connectors");
 const { createEvidenceUnit } = require("./evidence-model");
 const { extractTextFromResponsePayload } = require("./openai-response");
+const { resolveDataFile } = require("./data-paths");
 const {
   synthesizeTool,
   runEphemeralTool,
@@ -36,8 +36,8 @@ const {
 } = require("./stop-controller");
 const { KnowledgeGraph } = require("./knowledge-graph");
 
-const experiencePath = path.join(__dirname, "..", "data", "experience-memory.json");
-const knowledgeGraphPath = path.join(__dirname, "..", "data", "knowledge-graph.json");
+const experiencePath = resolveDataFile("experience-memory.json", "OPENSEARCH_EXPERIENCE_MEMORY_PATH");
+const knowledgeGraphPath = resolveDataFile("knowledge-graph.json", "OPENSEARCH_KNOWLEDGE_GRAPH_PATH");
 const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 const DEFAULT_PLANNER_MODEL = process.env.OPENAI_PLANNER_MODEL || "gpt-4o-mini";
 

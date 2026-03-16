@@ -38,9 +38,12 @@ node server.js
 - 当前版本会先根据问题主题对 connector 做优先级判断，再从统一 source tool 返回的候选中选择高价值来源。
 - 由于运行环境可达性限制，第一批来源优先选用了不需要额外密钥且在当前环境稳定可用的 4 类来源。
 - 架构已经按 connector 方式组织，后续可以继续补官方站点、视频平台和更多新闻源。
+- 仓库文本文件统一使用 UTF-8，编码约束见 `.editorconfig`。
 
 ## 测试
 
 ```bash
-node --test --test-isolation=none
+npm test
 ```
+
+测试会自动使用临时数据目录，避免污染仓库内的 `data/`。
