@@ -18,11 +18,12 @@ const sourceTypeLabels = {
 const toolLabels = {
   deep_read_page: "Deep Read",
   extract_video_intel: "Video Intel",
-  run_ephemeral_tool: "Ephemeral Tool"
+  run_ephemeral_tool: "Ephemeral Tool",
+  read_document_intel: "Document Intel"
 };
 
 function escapeHtml(value) {
-  return String(value)
+  return String(value ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -128,6 +129,8 @@ function renderFinalAnswer(result) {
   const conflicts = summary.conflicts || [];
   const uncertainty = summary.uncertainty || [];
   const dynamicTools = summary.dynamic_tools || [];
+  const scorecard = summary.evaluation_scorecard || null;
+  const stopState = summary.stop_state || null;
   const stopDecision = summary.stop_decision || null;
 
   container.className = "answer-card";
@@ -148,7 +151,7 @@ function renderFinalAnswer(result) {
       <section>
         <h4>Conflicts</h4>
         <ul class="tight-list">
-          ${(conflicts.length ? conflicts : [{ preferred_claim: "No major conflicts", reason: "No direct numerical contradiction detected." }])
+          ${(conflicts.length ? conflicts : [{ preferred_claim: "No major conflicts", reason: "No direct contradiction detected." }])
             .map((item) => `<li>${escapeHtml(item.preferred_claim || "")} | ${escapeHtml(item.reason || "")}</li>`)
             .join("")}
         </ul>
@@ -166,7 +169,15 @@ function renderFinalAnswer(result) {
         <ul class="tight-list">
           ${stopDecision
             ? `<li>${escapeHtml(stopDecision.should_stop ? "stop" : "continue")} | ${escapeHtml(stopDecision.can_answer_accurately ? "accurate" : "not yet accurate")} | ${escapeHtml(stopDecision.reasoning || "")}</li>`
-            : "<li>No LLM stop decision available.</li>"}
+            : `<li>${escapeHtml(stopState?.reason || "no_stop_decision")} | ${escapeHtml(stopState?.should_answer_now ? "answer now" : "continue gathering")} | ${escapeHtml(scorecard?.status || "heuristic only")}</li>`}
+        </ul>
+      </section>
+      <section>
+        <h4>Evaluation</h4>
+        <ul class="tight-list">
+          ${scorecard
+            ? `<li>readiness ${escapeHtml(String(scorecard.readiness))} | ${escapeHtml(scorecard.status || "")} | evidence ${escapeHtml(String(scorecard.checkpoints?.evidence_depth?.actual || 0))}/${escapeHtml(String(scorecard.checkpoints?.evidence_depth?.target || 0))}</li>`
+            : "<li>No evaluation scorecard available.</li>"}
         </ul>
       </section>
       <section>
@@ -253,6 +264,122 @@ function renderReads(reads) {
   }).join("");
 }
 
+function renderAgentRuntime(runtime) {
+  const container = document.getElementById("agentRuntimeOutput");
+  const agents = runtime?.agents || [];
+  if (!agents.length) {
+    container.className = "card-list empty-state";
+    container.textContent = "No agent runtime state.";
+    return;
+  }
+
+  container.className = "card-list";
+  container.innerHTML = agents.map((agent) => `
+    <article class="data-card">
+      <div class="data-card-top">
+        <span class="pill">${escapeHtml(agent.id)}</span>
+        <span class="score">${escapeHtml(agent.status || "unknown")}</span>
+      </div>
+      <h4>${escapeHtml(agent.current_task_id || "No active task")}</h4>
+      <ul class="tight-list">
+        <li>completed ${escapeHtml(String(agent.completed_tasks || 0))}</li>
+        <li>failed ${escapeHtml(String(agent.failed_tasks || 0))}</li>
+        <li>inbox ${escapeHtml(String(agent.inbox_count || 0))} / outbox ${escapeHtml(String(agent.outbox_count || 0))}</li>
+      </ul>
+    </article>
+  `).join("");
+}
+
+function renderScratchpadTimeline(scratchpad) {
+  const container = document.getElementById("scratchpadTimelineOutput");
+  const items = scratchpad?.workspace?.timeline || [];
+  if (!items.length) {
+    container.className = "timeline empty-state";
+    container.textContent = "No scratchpad timeline yet.";
+    return;
+  }
+
+  container.className = "timeline";
+  container.innerHTML = items.slice(-8).map((item, index) => `
+    <article class="timeline-item">
+      <div class="timeline-index">T${index + 1}</div>
+      <div class="timeline-body">
+        <h4>${escapeHtml(item.type || "event")}</h4>
+        <p><strong>At:</strong> ${escapeHtml(item.at || "")}</p>
+        <p><strong>Agent:</strong> ${escapeHtml(item.agent || "system")}</p>
+        <p><strong>Detail:</strong> ${escapeHtml(item.queries?.join(" | ") || item.selected_sources?.join(" | ") || String(item.evidence_items || ""))}</p>
+      </div>
+    </article>
+  `).join("");
+}
+
+function renderVerifierFollowUps(result) {
+  const container = document.getElementById("verifierOutput");
+  const followUps = result?.rounds?.flatMap((round) => round.agent_reports?.fact_verifier?.follow_ups || []) || [];
+  if (!followUps.length) {
+    container.className = "card-list empty-state";
+    container.textContent = "No verifier follow-ups.";
+    return;
+  }
+
+  container.className = "card-list";
+  container.innerHTML = followUps.map((item) => `
+    <article class="data-card">
+      <div class="data-card-top">
+        <span class="pill">${escapeHtml(item.kind || "review")}</span>
+        <span class="score">${escapeHtml(item.status || "")}</span>
+      </div>
+      <h4>${escapeHtml(item.key || "unknown key")}</h4>
+      <p>${escapeHtml(item.reason || "")}</p>
+      <div class="meta-line">${escapeHtml(item.preferred_source || "unknown source")}</div>
+    </article>
+  `).join("");
+}
+
+function renderKnowledgeGraph(graph) {
+  const container = document.getElementById("knowledgeGraphOutput");
+  if (!graph?.latest_version) {
+    container.className = "card-list empty-state";
+    container.textContent = "No knowledge graph yet.";
+    return;
+  }
+
+  const latest = graph.latest_version;
+  container.className = "card-list";
+  container.innerHTML = `
+    <article class="data-card">
+      <div class="data-card-top">
+        <span class="pill">${escapeHtml(latest.id || "version")}</span>
+        <span class="score">${escapeHtml(latest.label || "")}</span>
+      </div>
+      <h4>Latest Graph Snapshot</h4>
+      <ul class="tight-list">
+        <li>versions ${escapeHtml(String((graph.versions || []).length))}</li>
+        <li>entities ${escapeHtml(String(latest.counts?.entities || 0))}</li>
+        <li>claims ${escapeHtml(String(latest.counts?.claims || 0))}</li>
+        <li>relations ${escapeHtml(String(latest.counts?.relations || 0))}</li>
+      </ul>
+    </article>
+  `;
+}
+
+function setEmptyResultState() {
+  document.getElementById("roundsOutput").className = "timeline empty-state";
+  document.getElementById("roundsOutput").textContent = "Rounds will appear here.";
+  document.getElementById("agentRuntimeOutput").className = "card-list empty-state";
+  document.getElementById("agentRuntimeOutput").textContent = "Waiting for agent task traces...";
+  document.getElementById("scratchpadTimelineOutput").className = "timeline empty-state";
+  document.getElementById("scratchpadTimelineOutput").textContent = "Waiting for scratchpad timeline...";
+  document.getElementById("candidateOutput").className = "card-list empty-state";
+  document.getElementById("candidateOutput").textContent = "Waiting for candidates...";
+  document.getElementById("readOutput").className = "card-list empty-state";
+  document.getElementById("readOutput").textContent = "Waiting for reads...";
+  document.getElementById("verifierOutput").className = "card-list empty-state";
+  document.getElementById("verifierOutput").textContent = "Waiting for verifier follow-ups...";
+  document.getElementById("knowledgeGraphOutput").className = "card-list empty-state";
+  document.getElementById("knowledgeGraphOutput").textContent = "Waiting for knowledge graph...";
+}
+
 function renderPlanProgress(plan) {
   const connectors = (plan.chosen_connector_ids || []).map(displayConnector);
   prettyJson("planOutput", plan);
@@ -265,7 +392,8 @@ function renderPlanProgress(plan) {
     [
       `planner_mode: ${plan.planner_mode || "unknown"}`,
       `max_rounds: ${plan.stop_policy?.max_rounds || 0}`,
-      `queries: ${(plan.initial_queries || []).join(" | ")}`
+      `queries: ${(plan.initial_queries || []).join(" | ")}`,
+      `memory hints: ${(plan.experience_hints?.boosted_source_types || []).join(" | ") || "none"}`
     ]
   );
 }
@@ -282,7 +410,7 @@ function renderRoundProgress(payload) {
     [
       `queries: ${(payload.round.queries || []).join(" | ")}`,
       `selected: ${(payload.round.selected_sources || []).map((item) => `${item.title} (${displayConnector(item.connector)})`).join(" | ") || "none"}`,
-      `ephemeral tools: ${(payload.round.tool_attempts || []).map((item) => `${item.strategy} ${item.success ? "ok" : "failed"}`).join(" | ") || "none"}`
+      `verifier follow-ups: ${payload.round.agent_reports?.fact_verifier?.review_count || 0}`
     ]
   );
 }
@@ -351,7 +479,6 @@ async function checkHealth() {
 async function runResearch() {
   const question = document.getElementById("questionInput").value.trim();
   const mode = document.querySelector("input[name='mode']:checked").value;
-  const button = document.getElementById("runButton");
 
   if (!question) {
     document.getElementById("finalAnswer").className = "answer-card empty-state";
@@ -362,16 +489,13 @@ async function runResearch() {
   closeActiveStream();
   state.liveRounds = [];
   state.toolAttempts = [];
+  state.streamCompleted = false;
+  const button = document.getElementById("runButton");
   button.disabled = true;
   button.textContent = "Streaming...";
   prettyJson("planOutput", null);
   prettyJson("evaluationOutput", null);
-  document.getElementById("roundsOutput").className = "timeline empty-state";
-  document.getElementById("roundsOutput").textContent = "Waiting for round events...";
-  document.getElementById("candidateOutput").className = "card-list empty-state";
-  document.getElementById("candidateOutput").textContent = "Candidates will appear after completion.";
-  document.getElementById("readOutput").className = "card-list empty-state";
-  document.getElementById("readOutput").textContent = "Reads will appear after completion.";
+  setEmptyResultState();
   document.getElementById("confidenceBadge").textContent = "Connecting";
   document.getElementById("confidenceBadge").className = "badge";
   renderProgressCard("Starting research", "Opening streaming research session.", [], [
@@ -418,8 +542,12 @@ async function runResearch() {
       prettyJson("planOutput", result.plan);
       prettyJson("evaluationOutput", result.evaluation);
       renderRounds(result.rounds || []);
+      renderAgentRuntime(result.agent_runtime || null);
+      renderScratchpadTimeline(result.scratchpad || null);
       renderCandidates(result.candidates || []);
       renderReads(result.reads || []);
+      renderVerifierFollowUps(result);
+      renderKnowledgeGraph(result.knowledge_graph || null);
       state.memory = [result.experience, ...state.memory].slice(0, 8);
       state.toolMemory = result.tool_memory || state.toolMemory;
       renderMemory(state.memory);
@@ -469,12 +597,7 @@ function resetView() {
   document.getElementById("confidenceBadge").className = "badge badge-muted";
   prettyJson("planOutput", null);
   prettyJson("evaluationOutput", null);
-  document.getElementById("roundsOutput").className = "timeline empty-state";
-  document.getElementById("roundsOutput").textContent = "Rounds will appear here.";
-  document.getElementById("candidateOutput").className = "card-list empty-state";
-  document.getElementById("candidateOutput").textContent = "Waiting for candidates...";
-  document.getElementById("readOutput").className = "card-list empty-state";
-  document.getElementById("readOutput").textContent = "Waiting for reads...";
+  setEmptyResultState();
   setRunButtonIdle();
 }
 
@@ -483,3 +606,4 @@ document.getElementById("resetButton").addEventListener("click", resetView);
 
 checkHealth();
 fetchSamples();
+setEmptyResultState();

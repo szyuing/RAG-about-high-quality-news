@@ -5,6 +5,23 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { verifyEvidenceUnits } = require("./fact-verifier");
+const { extractTextFromResponsePayload } = require("./openai-response");
+
+// 视频转MP3和文本提取配置
+const VIDEO_PROCESSING_CONFIG = {
+  // ARS API配置
+  arsApi: {
+    enabled: process.env.ARS_API_ENABLED === "true",
+    endpoint: process.env.ARS_API_ENDPOINT || "https://api.ars.example.com/transcribe",
+    apiKey: process.env.ARS_API_KEY || ""
+  },
+  // 开源模型配置
+  openSourceModel: {
+    enabled: process.env.OPEN_SOURCE_MODEL_ENABLED === "true",
+    endpoint: process.env.OPEN_SOURCE_MODEL_ENDPOINT || "http://localhost:8000/transcribe",
+    model: process.env.OPEN_SOURCE_MODEL || "whisper-small"
+  }
+};
 
 const samplePrompts = [
   "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
@@ -397,6 +414,473 @@ function extractNumericFacts(value, sourceId, subjectHint = "source") {
   return facts.slice(0, 5);
 }
 
+function inferDocumentKindFromUrl(url, metadata = {}) {
+  const mimeType = String(metadata?.mime_type || metadata?.content_type || "").toLowerCase();
+  if (mimeType.includes("pdf")) return "pdf";
+  if (mimeType.includes("csv")) return "csv";
+  if (mimeType.includes("tab-separated-values")) return "tsv";
+  if (mimeType.includes("json")) return "json";
+  if (mimeType.includes("spreadsheet") || mimeType.includes("excel")) return "xlsx";
+  if (mimeType.includes("wordprocessingml") || mimeType.includes("msword")) return "docx";
+
+  const pathname = (() => {
+    try {
+      return new URL(url).pathname.toLowerCase();
+    } catch (_) {
+      return String(url || "").toLowerCase();
+    }
+  })();
+
+  if (pathname.endsWith(".pdf")) return "pdf";
+  if (pathname.endsWith(".csv")) return "csv";
+  if (pathname.endsWith(".tsv")) return "tsv";
+  if (pathname.endsWith(".json")) return "json";
+  if (pathname.endsWith(".xlsx") || pathname.endsWith(".xls")) return "xlsx";
+  if (pathname.endsWith(".docx") || pathname.endsWith(".doc")) return "docx";
+  return "webpage";
+}
+
+function resolveAbsoluteUrl(baseUrl, candidateUrl) {
+  if (!candidateUrl) {
+    return null;
+  }
+
+  try {
+    return new URL(candidateUrl, baseUrl).toString();
+  } catch (_) {
+    return null;
+  }
+}
+
+function normalizeCandidateMediaMetadata(candidate = {}) {
+  const metadata = { ...(candidate.metadata || {}) };
+  const rawImageUrls = [
+    ...(Array.isArray(metadata.page_images) ? metadata.page_images : []),
+    metadata.preview_image,
+    metadata.poster,
+    metadata.thumbnail,
+    metadata.image
+  ].filter(Boolean);
+  const pageImages = rawImageUrls
+    .map((item) => resolveAbsoluteUrl(candidate.url, item))
+    .filter(Boolean)
+    .filter((item, index, list) => list.indexOf(item) === index)
+    .slice(0, 3);
+
+  return {
+    ...candidate,
+    metadata: {
+      ...metadata,
+      page_images: pageImages,
+      preview_image: pageImages[0] || metadata.preview_image || null
+    }
+  };
+}
+
+function extractDocumentPageImagesFromHtml(html, baseUrl) {
+  const metaMatches = [
+    ...String(html || "").matchAll(/<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image|twitter:image:src)["'][^>]+content=["']([^"']+)["']/gi)
+  ];
+  const imgMatches = [
+    ...String(html || "").matchAll(/<img[^>]+src=["']([^"']+)["']/gi)
+  ];
+
+  const preferred = metaMatches.map((match) => match[1]);
+  const fallback = imgMatches
+    .map((match) => match[1])
+    .filter((src) => !/logo|icon|avatar|sprite|badge/i.test(src));
+
+  return [...preferred, ...fallback]
+    .map((item) => resolveAbsoluteUrl(baseUrl, item))
+    .filter(Boolean)
+    .filter((item, index, list) => list.indexOf(item) === index)
+    .slice(0, 3);
+}
+
+async function discoverCandidatePageImages(candidate, documentKind) {
+  const existingImages = Array.isArray(candidate.metadata?.page_images)
+    ? candidate.metadata.page_images.filter(Boolean)
+    : [];
+  if (existingImages.length) {
+    return existingImages.slice(0, 3);
+  }
+
+  if (!candidate?.url) {
+    return [];
+  }
+
+  const pathname = (() => {
+    try {
+      return new URL(candidate.url).pathname.toLowerCase();
+    } catch (_) {
+      return String(candidate.url || "").toLowerCase();
+    }
+  })();
+
+  if (/\.(pdf|docx?|xlsx?|csv|tsv|json)$/.test(pathname)) {
+    return [];
+  }
+
+  try {
+    const html = await fetchText(candidate.url, {
+      timeoutMs: 6000,
+      retries: 0,
+      headers: {
+        accept: "text/html,application/xhtml+xml"
+      }
+    });
+    return extractDocumentPageImagesFromHtml(html, candidate.url);
+  } catch (_) {
+    return [];
+  }
+}
+
+function parseDelimitedTable(text, delimiter = ",") {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (!lines.length) {
+    return { headers: [], rows: [] };
+  }
+
+  const rows = lines.map((line) => line.split(delimiter).map((cell) => cell.trim().replace(/^"|"$/g, "")));
+  const headers = rows[0];
+  return {
+    headers,
+    rows: rows.slice(1).map((cells) => {
+      const record = {};
+      headers.forEach((header, index) => {
+        record[header || `column_${index + 1}`] = cells[index] || "";
+      });
+      return record;
+    })
+  };
+}
+
+function tableToMarkdown(table, title) {
+  const headers = table.headers || [];
+  const rows = table.rows || [];
+  const previewRows = rows.slice(0, 5);
+
+  if (!headers.length) {
+    return `# ${title}\n\nNo structured rows were extracted.`;
+  }
+
+  const lines = [
+    `# ${title}`,
+    "",
+    `Columns: ${headers.join(", ")}`,
+    "",
+    `Row count: ${rows.length}`,
+    "",
+    `| ${headers.join(" | ")} |`,
+    `| ${headers.map(() => "---").join(" | ")} |`,
+    ...previewRows.map((row) => `| ${headers.map((header) => String(row[header] || "")).join(" | ")} |`)
+  ];
+
+  return lines.join("\n");
+}
+
+async function maybeSummarizeDocumentWithModel(candidate, documentKind, markdown) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || !markdown || markdown.length < 80) {
+    return null;
+  }
+
+  const preview = markdown.slice(0, 10000);
+  const prompt = [
+    "Summarize this document for a research workflow.",
+    "Return strict JSON with keys: summary, key_points, structured_facts.",
+    "Keep key_points to at most 4 short strings.",
+    "structured_facts should be an array of objects with subject, claim, value, unit when present.",
+    "",
+    `Title: ${candidate.title || candidate.url}`,
+    `Kind: ${documentKind}`,
+    "",
+    preview
+  ].join("\n");
+
+  const response = await fetch(process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    signal: AbortSignal.timeout(20000),
+    body: JSON.stringify({
+      model: process.env.OPENAI_DOCUMENT_MODEL || process.env.OPENAI_EVALUATOR_MODEL || "gpt-4o-mini",
+      store: false,
+      input: prompt,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "document_summary",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              summary: { type: "string" },
+              key_points: {
+                type: "array",
+                items: { type: "string" },
+                maxItems: 4
+              },
+              structured_facts: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    subject: { type: "string" },
+                    claim: { type: "string" },
+                    value: { type: ["number", "string", "null"] },
+                    unit: { type: ["string", "null"] }
+                  },
+                  required: ["subject", "claim", "value", "unit"]
+                },
+                maxItems: 5
+              }
+            },
+            required: ["summary", "key_points", "structured_facts"]
+          }
+        }
+      }
+    })
+  });
+
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || `Document model failed with HTTP ${response.status}`);
+  }
+
+  const text = payload?.output
+    ?.flatMap((item) => item.content || [])
+    ?.find((item) => item.type === "output_text")
+    ?.text || "";
+
+  return text ? JSON.parse(text) : null;
+}
+
+async function analyzeDocumentWithMultimodalModel(input) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return null;
+  }
+
+  const pageImages = (input.page_images || []).filter(Boolean).slice(0, 2);
+  const prompt = [
+    "Analyze this complex document for a research workflow.",
+    "Focus on tables, charts, layout signals, and any visual evidence that matters.",
+    "Return strict JSON with keys: summary, key_points, structured_facts, visual_observations.",
+    `Title: ${input.title || input.url || "document"}`,
+    `Document kind: ${input.document_kind || "unknown"}`,
+    "",
+    (input.markdown || "").slice(0, 12000)
+  ].join("\n");
+
+  const content = [{ type: "input_text", text: prompt }];
+  for (const imageUrl of pageImages) {
+    content.push({
+      type: "input_image",
+      image_url: imageUrl
+    });
+  }
+
+  const response = await fetch(process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    signal: AbortSignal.timeout(25000),
+    body: JSON.stringify({
+      model: process.env.OPENAI_MULTIMODAL_DOCUMENT_MODEL || process.env.OPENAI_DOCUMENT_MODEL || "gpt-4o-mini",
+      store: false,
+      input: [
+        {
+          role: "user",
+          content
+        }
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "document_multimodal_summary",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              summary: { type: "string" },
+              key_points: {
+                type: "array",
+                items: { type: "string" },
+                maxItems: 5
+              },
+              structured_facts: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    subject: { type: "string" },
+                    claim: { type: "string" },
+                    value: { type: ["number", "string", "null"] },
+                    unit: { type: ["string", "null"] }
+                  },
+                  required: ["subject", "claim", "value", "unit"]
+                },
+                maxItems: 6
+              },
+              visual_observations: {
+                type: "array",
+                items: { type: "string" },
+                maxItems: 4
+              }
+            },
+            required: ["summary", "key_points", "structured_facts", "visual_observations"]
+          }
+        }
+      }
+    })
+  });
+
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || `Document multimodal analysis failed with HTTP ${response.status}`);
+  }
+
+  const rawText = extractTextFromResponsePayload(payload);
+  return rawText ? JSON.parse(rawText) : null;
+}
+
+async function readDocumentSource(candidate) {
+  const normalizedCandidate = normalizeCandidateMediaMetadata(candidate);
+  const documentKind = inferDocumentKindFromUrl(normalizedCandidate.url, normalizedCandidate.metadata);
+  let markdown = "";
+  let tableData = null;
+  let processingMode = "native";
+
+  if (documentKind === "csv" || documentKind === "tsv") {
+    const raw = await fetchText(normalizedCandidate.url);
+    tableData = parseDelimitedTable(raw, documentKind === "tsv" ? "\t" : ",");
+    markdown = tableToMarkdown(tableData, normalizedCandidate.title);
+  } else if (documentKind === "json") {
+    const payload = await fetchJson(normalizedCandidate.url);
+    const topKeys = Object.keys(payload || {}).slice(0, 10);
+    markdown = [
+      `# ${normalizedCandidate.title}`,
+      "",
+      `Top-level keys: ${topKeys.join(", ") || "none"}`,
+      "",
+      JSON.stringify(payload, null, 2).slice(0, 6000)
+    ].join("\n");
+  } else {
+    const raw = await fetchText(toReaderUrl(normalizedCandidate.url), { timeoutMs: 20000, retries: 1 });
+    markdown = extractReaderMarkdown(raw);
+  }
+
+  let llmSummary = null;
+  let multimodalSummary = null;
+  const discoveredPageImages = await discoverCandidatePageImages(normalizedCandidate, documentKind);
+  const pageImages = discoveredPageImages.length
+    ? discoveredPageImages
+    : normalizedCandidate.metadata?.preview_image
+      ? [normalizedCandidate.metadata.preview_image]
+      : [];
+
+  if ((["pdf", "docx", "xlsx"].includes(documentKind) || pageImages.length > 0) && process.env.OPENAI_API_KEY) {
+    try {
+      multimodalSummary = await analyzeDocumentWithMultimodalModel({
+        url: normalizedCandidate.url,
+        title: normalizedCandidate.title,
+        document_kind: documentKind,
+        markdown,
+        page_images: pageImages
+      });
+      if (multimodalSummary) {
+        processingMode = pageImages.length > 0 ? "multimodal_visual" : "multimodal_text_first";
+      }
+    } catch (_) {
+      processingMode = "native";
+    }
+  }
+
+  if (["pdf", "docx", "xlsx"].includes(documentKind) || (tableData && tableData.rows.length > 20)) {
+    try {
+      llmSummary = multimodalSummary || await maybeSummarizeDocumentWithModel(normalizedCandidate, documentKind, markdown);
+      if (llmSummary) {
+        processingMode = processingMode === "native" ? "llm_assisted" : processingMode;
+      }
+    } catch (_) {
+      if (!multimodalSummary) {
+        processingMode = "native";
+      }
+    }
+  }
+
+  const effectiveSummary = llmSummary || multimodalSummary;
+  const keyPoints = effectiveSummary?.key_points?.length
+    ? [
+      ...effectiveSummary.key_points,
+      ...(multimodalSummary?.visual_observations || [])
+    ].slice(0, 6)
+    : extractKeyPointsFromText(markdown);
+
+  const facts = [
+    ...extractNumericFacts(markdown, normalizedCandidate.id, normalizedCandidate.title || "document"),
+    ...((effectiveSummary?.structured_facts || []).map((item) => ({
+      source_id: normalizedCandidate.id,
+      subject: item.subject,
+      kind: "document_fact",
+      claim: item.claim,
+      value: item.value,
+      unit: item.unit || null,
+      evidence: item.claim
+    })))
+  ].slice(0, 8);
+
+  const summarySections = [];
+  if (effectiveSummary?.summary) {
+    summarySections.push(`## Model Summary\n${effectiveSummary.summary}`);
+  }
+  if (multimodalSummary?.visual_observations?.length) {
+    summarySections.push(
+      `## Visual Observations\n${multimodalSummary.visual_observations.map((item) => `- ${item}`).join("\n")}`
+    );
+  }
+
+  return {
+    source_id: candidate.id,
+    content_type: normalizedCandidate.content_type || normalizedCandidate.source_type || "document",
+    source_type: normalizedCandidate.source_type || "document",
+    tool: "read_document_intel",
+    title: normalizedCandidate.title,
+    url: normalizedCandidate.url,
+    author: normalizedCandidate.author,
+    published_at: normalizedCandidate.published_at,
+    markdown: summarySections.length
+      ? `${markdown}\n\n${summarySections.join("\n\n")}`
+      : markdown,
+    key_points: keyPoints,
+    sections: buildSectionsFromMarkdown(markdown),
+    facts,
+    table_data: tableData,
+    document_kind: documentKind,
+    processing_mode: processingMode,
+    visual_observations: multimodalSummary?.visual_observations || [],
+    page_images: pageImages,
+    source_metadata: {
+      ...(normalizedCandidate.metadata || {}),
+      page_images: pageImages,
+      preview_image: pageImages[0] || normalizedCandidate.metadata?.preview_image || null
+    }
+  };
+}
+
 function timestampFromMilliseconds(value) {
   const totalSeconds = Math.max(0, Math.floor(Number(value || 0) / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -409,25 +893,270 @@ function timestampFromMilliseconds(value) {
 }
 
 function buildTranscriptTimeline(cues) {
-  const groups = [];
-  let buffer = [];
+  if (!cues || cues.length === 0) {
+    return [];
+  }
+
+  const segments = [];
+  let currentSegment = null;
 
   for (const cue of cues) {
-    buffer.push(cue);
-    if (buffer.length >= 6) {
-      groups.push(buffer);
-      buffer = [];
+    const textLength = cue.text?.length || 0;
+    
+    if (!currentSegment) {
+      currentSegment = {
+        start: cue.start || 0,
+        end: cue.start || 0,
+        texts: [cue.text],
+        totalLength: textLength
+      };
+    } else if (currentSegment.totalLength + textLength < 200) {
+      currentSegment.texts.push(cue.text);
+      currentSegment.end = cue.start || currentSegment.end;
+      currentSegment.totalLength += textLength;
+    } else {
+      segments.push(currentSegment);
+      currentSegment = {
+        start: cue.start || 0,
+        end: cue.start || 0,
+        texts: [cue.text],
+        totalLength: textLength
+      };
     }
   }
-  if (buffer.length) {
-    groups.push(buffer);
+
+  if (currentSegment) {
+    segments.push(currentSegment);
   }
 
-  return groups.slice(0, 6).map((group) => ({
-    start: group[0].start,
-    title: group[0].text.slice(0, 42),
-    summary: group.map((item) => item.text).join(" ").slice(0, 220)
+  return segments.slice(0, 10).map((segment) => {
+    const fullText = segment.texts.join(" ");
+    const summary = extractKeyPointsFromText(fullText, 2);
+    return {
+      start: timestampFromMilliseconds(segment.start * 1000),
+      end: timestampFromMilliseconds(segment.end * 1000),
+      title: segment.texts[0]?.slice(0, 42) || "片段",
+      summary: summary.length > 0 ? summary[0] : fullText.slice(0, 220),
+      full_text: fullText.slice(0, 500)
+    };
+  });
+}
+
+// 提取视频关键观点和时间点
+function extractVideoKeyPoints(transcript, maxPoints = 8) {
+  if (!transcript || transcript.length === 0) {
+    return [];
+  }
+
+  const keyPatterns = [
+    /最重要|关键|核心|主要|本质/,
+    /首先|第一|第二|第三|最后/,
+    /但是|然而|不过|虽然|尽管/,
+    /因为|所以|因此|由于|导致/,
+    /比如|例如|就像|相当于/,
+    /需要|必须|应该|可以|能够/,
+    /问题|挑战|难点|困难|优势|劣势/,
+    /总结|结论|总的来说|总而言之/
+  ];
+
+  const candidates = [];
+
+  for (const item of transcript) {
+    const text = item.text || "";
+    let score = 0;
+
+    for (const pattern of keyPatterns) {
+      if (pattern.test(text)) {
+        score += 1;
+      }
+    }
+
+    if (text.length > 20 && text.length < 300) {
+      score += text.length / 100;
+    }
+
+    if (candidates.length > 0) {
+      const lastTime = candidates[candidates.length - 1].timestamp;
+      if ((item.start || 0) - lastTime > 120) {
+        score += 0.5;
+      }
+    }
+
+    if (score > 0) {
+      candidates.push({
+        timestamp: item.start || 0,
+        timeFormatted: timestampFromMilliseconds((item.start || 0) * 1000),
+        text: text.slice(0, 300),
+        score
+      });
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+
+  return candidates.slice(0, maxPoints).sort((a, b) => a.timestamp - b.timestamp).map(item => ({
+    timestamp: item.timestamp,
+    time: item.timeFormatted,
+    point: item.text,
+    type: classifyKeyPoint(item.text)
   }));
+}
+
+function classifyKeyPoint(text) {
+  const patterns = {
+    conclusion: /总结|结论|总的来说|总而言之|最终|总的来说/,
+    step: /首先|第一|第二|第三|最后|步骤|阶段/,
+    contrast: /但是|然而|不过|虽然|尽管|相反/,
+    cause: /因为|所以|因此|由于|导致|造成/,
+    example: /比如|例如|就像|相当于|比如/,
+    requirement: /需要|必须|应该|可以|能够|必须|应该/
+  };
+
+  for (const [type, pattern] of Object.entries(patterns)) {
+    if (pattern.test(text)) {
+      return type;
+    }
+  }
+  return "insight";
+}
+
+// 视频转MP3功能
+async function convertVideoToMp3(videoUrl, outputPath) {
+  return new Promise((resolve, reject) => {
+    const ytDlpPath = path.join(os.tmpdir(), "yt-dlp.exe");
+    const args = [
+      "-x",
+      "--audio-format", "mp3",
+      "-o", outputPath,
+      videoUrl
+    ];
+
+    const process = spawn(ytDlpPath, args);
+    let output = "";
+    let error = "";
+
+    process.stdout.on("data", (data) => {
+      output += data.toString();
+    });
+
+    process.stderr.on("data", (data) => {
+      error += data.toString();
+    });
+
+    process.on("close", (code) => {
+      if (code === 0) {
+        resolve(outputPath);
+      } else {
+        reject(new Error(`视频转MP3失败: ${error}`));
+      }
+    });
+
+    process.on("error", (err) => {
+      reject(err);
+    });
+  });
+}
+
+// 通过ARS API转文本
+async function transcribeWithArsApi(audioPath) {
+  if (!VIDEO_PROCESSING_CONFIG.arsApi.enabled || !VIDEO_PROCESSING_CONFIG.arsApi.apiKey) {
+    throw new Error("ARS API 未配置或未启用");
+  }
+
+  const formData = new FormData();
+  formData.append('audio', fs.createReadStream(audioPath));
+
+  const response = await fetch(VIDEO_PROCESSING_CONFIG.arsApi.endpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${VIDEO_PROCESSING_CONFIG.arsApi.apiKey}`
+    },
+    body: formData
+  });
+
+  if (!response.ok) {
+    throw new Error(`ARS API 调用失败: ${await response.text()}`);
+  }
+
+  return await response.json();
+}
+
+// 通过开源模型转文本
+async function transcribeWithOpenSourceModel(audioPath) {
+  if (!VIDEO_PROCESSING_CONFIG.openSourceModel.enabled) {
+    throw new Error("开源模型未配置或未启用");
+  }
+
+  const formData = new FormData();
+  formData.append('audio', fs.createReadStream(audioPath));
+  formData.append('model', VIDEO_PROCESSING_CONFIG.openSourceModel.model);
+
+  const response = await fetch(VIDEO_PROCESSING_CONFIG.openSourceModel.endpoint, {
+    method: 'POST',
+    body: formData
+  });
+
+  if (!response.ok) {
+    throw new Error(`开源模型调用失败: ${await response.text()}`);
+  }
+
+  return await response.json();
+}
+
+// 视频转文本主函数
+async function transcribeVideo(videoUrl) {
+  const tempDir = os.tmpdir();
+  const audioPath = path.join(tempDir, `audio_${Date.now()}.mp3`);
+
+  try {
+    await convertVideoToMp3(videoUrl, audioPath);
+
+    if (VIDEO_PROCESSING_CONFIG.arsApi.enabled) {
+      try {
+        const result = await transcribeWithArsApi(audioPath);
+        const cues = result.cues || [];
+        const timeline = result.timeline || buildTranscriptTimeline(cues);
+        const keyPoints = result.key_points || extractVideoKeyPoints(cues, 8);
+        return {
+          success: true,
+          method: "ars_api",
+          transcript: result.transcript || cues,
+          timeline,
+          key_points: keyPoints
+        };
+      } catch (arsError) {
+        console.warn("ARS API 调用失败，尝试使用开源模型:", arsError.message);
+      }
+    }
+
+    if (VIDEO_PROCESSING_CONFIG.openSourceModel.enabled) {
+      try {
+        const result = await transcribeWithOpenSourceModel(audioPath);
+        const cues = result.cues || [];
+        const timeline = result.timeline || buildTranscriptTimeline(cues);
+        const keyPoints = result.key_points || extractVideoKeyPoints(cues, 8);
+        return {
+          success: true,
+          method: "open_source_model",
+          transcript: result.transcript || cues,
+          timeline,
+          key_points: keyPoints
+        };
+      } catch (openSourceError) {
+        console.warn("开源模型调用失败:", openSourceError.message);
+      }
+    }
+
+    throw new Error("所有转文本方法均失败");
+  } finally {
+    if (fs.existsSync(audioPath)) {
+      try {
+        fs.unlinkSync(audioPath);
+      } catch (error) {
+        console.warn("清理临时文件失败:", error.message);
+      }
+    }
+  }
 }
 
 function parseBingSearchMarkdown(markdown, query) {
@@ -886,14 +1615,14 @@ async function invokeSourceTool(input) {
         const blob = normalizeWhitespace(`${candidate.title} ${candidate.summary} ${candidate.url}`).toLowerCase();
         const hits = queryTokens.filter((token) => blob.includes(token)).length;
         const relevanceBoost = queryTokens.length ? hits / queryTokens.length : 0.2;
-        return {
+        return normalizeCandidateMediaMetadata({
           ...candidate,
           score: Number((candidate.score + relevanceBoost * 0.35).toFixed(4)),
           metadata: {
             ...(candidate.metadata || {}),
             query_hits: hits
           }
-        };
+        });
       })
       .filter((candidate) => {
         if (!queryTokens.length) {
@@ -1464,10 +2193,28 @@ async function readBilibiliSource(candidate) {
   const description = stripTags(video.desc || decodeHtmlEntities(descriptionMeta?.[1] || candidate.summary));
   const stats = video.stat || {};
   const duration = timestampFromMilliseconds((video.duration || 0) * 1000);
-  const keyPoints = [
+  
+  // 尝试使用新的视频转文本功能
+  let transcript = [];
+  let timeline = [];
+  let keyPoints = [
     description.slice(0, 220),
     `作者 ${video.owner?.name || candidate.author}，播放 ${stats.view || 0}，点赞 ${stats.like || 0}，评论 ${stats.reply || 0}。`
   ].filter(Boolean);
+  
+  try {
+    const transcribeResult = await transcribeVideo(candidate.url);
+    if (transcribeResult.success) {
+      transcript = transcribeResult.transcript || [];
+      timeline = transcribeResult.timeline || [];
+      if (transcribeResult.key_points && transcribeResult.key_points.length > 0) {
+        keyPoints = [...transcribeResult.key_points, ...keyPoints];
+      }
+    }
+  } catch (error) {
+    console.warn(`Bilibili视频转文本失败: ${error.message}`);
+  }
+  
   const markdown = [
     `# ${video.title || candidate.title}`,
     "",
@@ -1491,8 +2238,8 @@ async function readBilibiliSource(candidate) {
     published_at: formatUnixTimestamp(video.pubdate),
     duration,
     markdown,
-    transcript: [],
-    timeline: [],
+    transcript,
+    timeline,
     key_points: keyPoints,
     key_frames: keyPoints,
     facts: extractNumericFacts(`${description}\n${markdown}`, candidate.id, "bilibili_video")
@@ -1673,13 +2420,32 @@ async function readDouyinSourceV2(candidate) {
       const rendered = await captureRenderedPage(detailUrl);
       const parsed = parseDouyinRenderedPageSafe(rendered);
       if (parsed?.title) {
-        const keyPoints = [
+        let keyPoints = [
           parsed.series_title ? `\u7cfb\u5217\uff1a${parsed.series_title}` : "",
           parsed.author ? `\u4f5c\u8005\uff1a${parsed.author}` : "",
           parsed.published_label ? `\u53d1\u5e03\u65f6\u95f4\uff1a${parsed.published_label}` : "",
           parsed.author_stats ? `\u8d26\u53f7\u6982\u51b5\uff1a${parsed.author_stats}` : "",
           parsed.metrics.length ? `\u4e92\u52a8\u6307\u6807\uff1a${parsed.metrics.join(" / ")}` : ""
         ].filter(Boolean);
+        let timeline = parsed.timeline;
+        let transcript = [];
+        
+        // 尝试使用新的视频转文本功能
+        try {
+          const transcribeResult = await transcribeVideo(detailUrl);
+          if (transcribeResult.success) {
+            transcript = transcribeResult.transcript || [];
+            if (transcribeResult.timeline && transcribeResult.timeline.length > 0) {
+              timeline = transcribeResult.timeline;
+            }
+            if (transcribeResult.key_points && transcribeResult.key_points.length > 0) {
+              keyPoints = [...transcribeResult.key_points, ...keyPoints];
+            }
+          }
+        } catch (error) {
+          console.warn(`抖音视频转文本失败: ${error.message}`);
+        }
+        
         const markdown = [
           `# ${parsed.title}`,
           "",
@@ -1691,8 +2457,8 @@ async function readDouyinSourceV2(candidate) {
           parsed.metrics.length ? `\u4e92\u52a8\u6307\u6807\uff1a${parsed.metrics.join(" / ")}` : "",
           "",
           candidate.summary ? `\u6765\u6e90\u6458\u8981\uff1a${candidate.summary}` : "",
-          parsed.timeline.length ? "## \u7ae0\u8282\u8981\u70b9" : "",
-          ...parsed.timeline.map((item) => `- [${item.start}] ${item.summary}`)
+          timeline.length ? "## \u7ae0\u8282\u8981\u70b9" : "",
+          ...timeline.map((item) => `- [${item.start}] ${item.summary}`)
         ].filter(Boolean).join("\n");
 
         return {
@@ -1706,12 +2472,12 @@ async function readDouyinSourceV2(candidate) {
           published_at: parsed.published_at || candidate.published_at,
           duration: parsed.duration,
           markdown,
-          transcript: [],
-          timeline: parsed.timeline,
+          transcript,
+          timeline,
           key_points: keyPoints.length ? keyPoints : [candidate.summary].filter(Boolean),
           key_frames: [
             parsed.title,
-            ...parsed.timeline.slice(0, 2).map((item) => item.summary)
+            ...timeline.slice(0, 2).map((item) => item.summary)
           ].filter(Boolean),
           facts: extractNumericFacts(markdown, candidate.id, "douyin_video")
         };
@@ -1740,14 +2506,35 @@ async function readTedSource(candidate) {
   const cues = transcriptData
     .flatMap((paragraph) => paragraph.cues || [])
     .map((cue) => ({
-      start: timestampFromMilliseconds(cue.time),
+      start: cue.time,
       text: normalizeWhitespace(cue.text)
     }))
     .filter((cue) => cue.text);
 
   const description = pageProps.description || candidate.summary;
   const timeline = buildTranscriptTimeline(cues);
-  const transcriptText = cues.map((cue) => `[${cue.start}] ${cue.text}`).join("\n");
+  let transcript = cues;
+  let keyPoints = [description ? description.slice(0, 220) : "TED talk"];
+  
+  // 尝试使用新的视频转文本功能作为补充
+  try {
+    const transcribeResult = await transcribeVideo(candidate.url);
+    if (transcribeResult.success) {
+      if (transcribeResult.transcript && transcribeResult.transcript.length > 0) {
+        transcript = transcribeResult.transcript;
+      }
+      if (transcribeResult.timeline && transcribeResult.timeline.length > 0) {
+        timeline = transcribeResult.timeline;
+      }
+      if (transcribeResult.key_points && transcribeResult.key_points.length > 0) {
+        keyPoints = [...transcribeResult.key_points, ...keyPoints];
+      }
+    }
+  } catch (error) {
+    console.warn(`TED视频转文本失败: ${error.message}`);
+  }
+  
+  const transcriptText = transcript.map((cue) => `[${cue.start}] ${cue.text}`).join("\n");
 
   return {
     source_id: candidate.id,
@@ -1759,8 +2546,9 @@ async function readTedSource(candidate) {
     author: candidate.author,
     published_at: candidate.published_at,
     duration: playerData.duration ? timestampFromMilliseconds(playerData.duration * 1000) : null,
-    transcript: cues,
+    transcript,
     timeline,
+    key_points: keyPoints,
     key_frames: [
       description ? description.slice(0, 220) : "TED talk",
       ...(timeline.slice(0, 2).map((item) => item.summary))
@@ -1809,7 +2597,8 @@ function buildCandidateFromToolInput(toolId, input) {
   }
 
   const connector = input?.connector || inferConnectorIdFromUrl(url);
-  const contentType = input?.content_type || contentTypeForConnector(connector);
+  const inferredDocumentKind = inferDocumentKindFromUrl(url, input?.metadata);
+  const contentType = input?.content_type || (inferredDocumentKind !== "webpage" ? "document" : contentTypeForConnector(connector));
 
   if (toolId === "extract_video_intel" && contentType !== "video") {
     throw new Error(`extract_video_intel does not support inferred connector ${connector}`);
@@ -1818,7 +2607,7 @@ function buildCandidateFromToolInput(toolId, input) {
     throw new Error("Use extract_video_intel for video sources");
   }
 
-  return {
+  return normalizeCandidateMediaMetadata({
     id: makeId(contentType === "video" ? "video" : "web", url),
     connector,
     title: input?.title || url,
@@ -1830,11 +2619,15 @@ function buildCandidateFromToolInput(toolId, input) {
     published_at: input?.published_at || null,
     summary: input?.summary || "",
     metadata: input?.metadata || {}
-  };
+  });
 }
 
 async function executeReadTool(toolId, input) {
   const candidate = buildCandidateFromToolInput(toolId, input);
+  const documentKind = inferDocumentKindFromUrl(candidate.url, candidate.metadata);
+  if (toolId !== "extract_video_intel" && documentKind !== "webpage" && candidate.connector !== "arxiv") {
+    return readDocumentSource(candidate);
+  }
   const connector = connectorMap.get(candidate.connector);
   if (!connector?.read) {
     throw new Error(`Unsupported connector: ${candidate.connector}`);
@@ -1843,6 +2636,82 @@ async function executeReadTool(toolId, input) {
 }
 
 // 注册核心工具
+ToolRegistry.registerTool({
+  id: 'read_document_intel',
+  name: 'Read Document Intel',
+  description: 'Read PDFs, tables, and complex documents with native parsing plus optional model-assisted summarization.',
+  parameters: [
+    {
+      name: 'url',
+      type: 'string',
+      required: false,
+      description: 'Document URL'
+    },
+    {
+      name: 'candidate',
+      type: 'object',
+      required: false,
+      description: 'Structured document candidate'
+    }
+  ],
+  validate(input) {
+    if (!input?.url && !input?.candidate?.url) {
+      throw new Error('Either url or candidate.url is required');
+    }
+  },
+  async execute(input) {
+    const candidate = buildCandidateFromToolInput('read_document_intel', input);
+    return readDocumentSource(candidate);
+  }
+});
+
+ToolRegistry.registerTool({
+  id: 'analyze_document_multimodal',
+  name: 'Analyze Document Multimodal',
+  description: 'Use a multimodal LLM to analyze complex documents, optionally with page images for charts and layout-heavy pages.',
+  parameters: [
+    {
+      name: 'url',
+      type: 'string',
+      required: false,
+      description: 'Document URL'
+    },
+    {
+      name: 'candidate',
+      type: 'object',
+      required: false,
+      description: 'Structured document candidate'
+    },
+    {
+      name: 'markdown',
+      type: 'string',
+      required: false,
+      description: 'Extracted document text'
+    },
+    {
+      name: 'page_images',
+      type: 'array',
+      required: false,
+      description: 'Optional document page images'
+    }
+  ],
+  validate(input) {
+    if (!input?.url && !input?.candidate?.url) {
+      throw new Error('Either url or candidate.url is required');
+    }
+  },
+  async execute(input) {
+    const candidate = buildCandidateFromToolInput('analyze_document_multimodal', input);
+    return analyzeDocumentWithMultimodalModel({
+      url: candidate.url,
+      title: candidate.title,
+      document_kind: inferDocumentKindFromUrl(candidate.url, candidate.metadata),
+      markdown: input.markdown || "",
+      page_images: input.page_images || candidate.metadata?.page_images || []
+    });
+  }
+});
+
 ToolRegistry.registerTool({
   id: 'deep_read_page',
   name: 'Deep Read Page',
@@ -2046,6 +2915,55 @@ ToolRegistry.registerTool({
   }
 });
 
+// 视频转文本工具
+ToolRegistry.registerTool({
+  id: 'transcribe_video',
+  name: 'Transcribe Video',
+  description: 'Convert video to text using ARS API or open-source model. First converts video to MP3, then transcribes audio to text.',
+  parameters: [
+    {
+      name: 'videoUrl',
+      type: 'string',
+      required: true,
+      description: 'Video URL to transcribe'
+    },
+    {
+      name: 'method',
+      type: 'string',
+      required: false,
+      description: 'Transcription method: "auto" (default), "ars_api", or "open_source_model"',
+      default: 'auto'
+    }
+  ],
+  validate(input) {
+    if (!input?.videoUrl) {
+      throw new Error('videoUrl is required');
+    }
+  },
+  async execute(input) {
+    const { videoUrl, method = 'auto' } = input;
+    
+    const originalArsEnabled = VIDEO_PROCESSING_CONFIG.arsApi.enabled;
+    const originalOpenSourceEnabled = VIDEO_PROCESSING_CONFIG.openSourceModel.enabled;
+    
+    try {
+      if (method === 'ars_api') {
+        VIDEO_PROCESSING_CONFIG.arsApi.enabled = true;
+        VIDEO_PROCESSING_CONFIG.openSourceModel.enabled = false;
+      } else if (method === 'open_source_model') {
+        VIDEO_PROCESSING_CONFIG.arsApi.enabled = false;
+        VIDEO_PROCESSING_CONFIG.openSourceModel.enabled = true;
+      }
+      
+      const result = await transcribeVideo(videoUrl);
+      return result;
+    } finally {
+      VIDEO_PROCESSING_CONFIG.arsApi.enabled = originalArsEnabled;
+      VIDEO_PROCESSING_CONFIG.openSourceModel.enabled = originalOpenSourceEnabled;
+    }
+  }
+});
+
 module.exports = {
   samplePrompts,
   sourceCatalog,
@@ -2069,6 +2987,8 @@ module.exports = {
     findEdgeExecutable,
     parseDouyinRenderedPageSafe,
     extractReaderMarkdown,
-    stripTags
+    stripTags,
+    inferDocumentKindFromUrl,
+    parseDelimitedTable
   }
 };

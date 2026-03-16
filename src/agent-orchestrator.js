@@ -28,7 +28,8 @@ const AgentType = {
   DEEP_ANALYST: 'deep_analyst',
   MULTIMEDIA: 'multimedia',
   FACT_VERIFIER: 'fact_verifier',
-  SYNTHESIZER: 'synthesizer'
+  SYNTHESIZER: 'synthesizer',
+  TOOL_CREATOR: 'tool_creator'
 };
 
 // 创建 Agent 类
@@ -242,6 +243,37 @@ class WebResearcherAgent extends BaseAgent {
     });
   }
 
+  generateMarkdownReport(query, candidates) {
+    const lines = [
+      `# Web Researcher Agent 报告`,
+      `**查询**: ${query}`,
+      `**候选来源数量**: ${candidates?.length || 0}`,
+      ``,
+      `## 搜索结果`,
+      ``
+    ];
+
+    for (const candidate of candidates || []) {
+      const score = (candidate.score * 100).toFixed(1);
+      lines.push(`### ${candidate.title || 'Untitled'}`);
+      lines.push(`- **来源**: ${candidate.connector}`);
+      lines.push(`- **URL**: ${candidate.url}`);
+      lines.push(`- **相关性得分**: ${score}%`);
+      if (candidate.summary) {
+        lines.push(`- **摘要**: ${candidate.summary.slice(0, 200)}...`);
+      }
+      if (candidate.author) {
+        lines.push(`- **作者**: ${candidate.author}`);
+      }
+      if (candidate.published_at) {
+        lines.push(`- **发布时间**: ${candidate.published_at}`);
+      }
+      lines.push(``);
+    }
+
+    return lines.join('\n');
+  }
+
   async execute(input) {
     this.status = AgentStatus.RUNNING;
     this.startTime = Date.now();
@@ -257,12 +289,16 @@ class WebResearcherAgent extends BaseAgent {
       this.result = {
         query,
         candidates: candidates || [],
-        count: candidates?.length || 0
+        count: candidates?.length || 0,
+        markdown_report: this.generateMarkdownReport(query, candidates)
       };
       this.status = AgentStatus.COMPLETED;
     } catch (error) {
       this.error = error;
       this.status = AgentStatus.FAILED;
+      this.result = {
+        markdown_report: `# Web Researcher Agent 报告\n\n**错误**: ${error.message}`
+      };
     }
     
     this.endTime = Date.now();
@@ -278,6 +314,61 @@ class DeepAnalystAgent extends BaseAgent {
       type: AgentType.DEEP_ANALYST,
       tools: ['deep_read_page']
     });
+  }
+
+  generateMarkdownReport(reads) {
+    const lines = [
+      `# Deep Analyst Agent 报告`,
+      `**深度阅读数量**: ${reads.length}`,
+      ``
+    ];
+
+    for (const read of reads) {
+      if (read.error) {
+        lines.push(`## ❌ ${read.candidate?.title || 'Unknown'}`);
+        lines.push(`- **错误**: ${read.error}`);
+        lines.push(``);
+        continue;
+      }
+
+      lines.push(`## ${read.title || 'Untitled'}`);
+      lines.push(`- **来源**: ${read.source_type}`);
+      lines.push(`- **URL**: ${read.url}`);
+      if (read.author) {
+        lines.push(`- **作者**: ${read.author}`);
+      }
+      if (read.published_at) {
+        lines.push(`- **发布时间**: ${read.published_at}`);
+      }
+      if (read.duration) {
+        lines.push(`- **时长**: ${read.duration}`);
+      }
+      lines.push(``);
+
+      if (read.markdown) {
+        lines.push(`### 内容摘要`);
+        lines.push(read.markdown.slice(0, 1000));
+        lines.push(``);
+      }
+
+      if (read.key_points && read.key_points.length > 0) {
+        lines.push(`### 关键要点`);
+        for (const point of read.key_points) {
+          lines.push(`- ${point}`);
+        }
+        lines.push(``);
+      }
+
+      if (read.facts && read.facts.length > 0) {
+        lines.push(`### 提取的事实`);
+        for (const fact of read.facts.slice(0, 5)) {
+          lines.push(`- ${fact}`);
+        }
+        lines.push(``);
+      }
+    }
+
+    return lines.join('\n');
   }
 
   async execute(input) {
@@ -302,12 +393,16 @@ class DeepAnalystAgent extends BaseAgent {
       
       this.result = {
         reads,
-        count: reads.length
+        count: reads.length,
+        markdown_report: this.generateMarkdownReport(reads)
       };
       this.status = AgentStatus.COMPLETED;
     } catch (error) {
       this.error = error;
       this.status = AgentStatus.FAILED;
+      this.result = {
+        markdown_report: `# Deep Analyst Agent 报告\n\n**错误**: ${error.message}`
+      };
     }
     
     this.endTime = Date.now();
@@ -323,6 +418,70 @@ class MultimediaAgent extends BaseAgent {
       type: AgentType.MULTIMEDIA,
       tools: ['extract_video_intel']
     });
+  }
+
+  generateMarkdownReport(videoIntel) {
+    const lines = [
+      `# Multimedia Agent 报告`,
+      `**视频数量**: ${videoIntel.length}`,
+      ``
+    ];
+
+    for (const video of videoIntel) {
+      if (video.error) {
+        lines.push(`## ❌ ${video.candidate?.title || 'Unknown'}`);
+        lines.push(`- **错误**: ${video.error}`);
+        lines.push(``);
+        continue;
+      }
+
+      lines.push(`## ${video.title || 'Untitled'}`);
+      lines.push(`- **来源**: ${video.source_type}`);
+      lines.push(`- **URL**: ${video.url}`);
+      if (video.author) {
+        lines.push(`- **作者**: ${video.author}`);
+      }
+      if (video.published_at) {
+        lines.push(`- **发布时间**: ${video.published_at}`);
+      }
+      if (video.duration) {
+        lines.push(`- **时长**: ${video.duration}`);
+      }
+      lines.push(``);
+
+      if (video.transcript && video.transcript.length > 0) {
+        lines.push(`### 转录文本`);
+        const transcriptText = video.transcript.map(t => `[${t.start}] ${t.text}`).join('\n');
+        lines.push(transcriptText.slice(0, 2000));
+        lines.push(``);
+      }
+
+      if (video.timeline && video.timeline.length > 0) {
+        lines.push(`### 时间轴摘要`);
+        for (const item of video.timeline) {
+          lines.push(`- **[${item.start}]** ${item.title || item.summary}`);
+        }
+        lines.push(``);
+      }
+
+      if (video.key_points && video.key_points.length > 0) {
+        lines.push(`### 关键要点`);
+        for (const point of video.key_points) {
+          lines.push(`- ${point}`);
+        }
+        lines.push(``);
+      }
+
+      if (video.key_frames && video.key_frames.length > 0) {
+        lines.push(`### 关键帧描述`);
+        for (const frame of video.key_frames) {
+          lines.push(`- ${frame}`);
+        }
+        lines.push(``);
+      }
+    }
+
+    return lines.join('\n');
   }
 
   async execute(input) {
@@ -347,12 +506,16 @@ class MultimediaAgent extends BaseAgent {
       
       this.result = {
         videos: videoIntel,
-        count: videoIntel.length
+        count: videoIntel.length,
+        markdown_report: this.generateMarkdownReport(videoIntel)
       };
       this.status = AgentStatus.COMPLETED;
     } catch (error) {
       this.error = error;
       this.status = AgentStatus.FAILED;
+      this.result = {
+        markdown_report: `# Multimedia Agent 报告\n\n**错误**: ${error.message}`
+      };
     }
     
     this.endTime = Date.now();
@@ -368,6 +531,60 @@ class FactVerifierAgent extends BaseAgent {
       type: AgentType.FACT_VERIFIER,
       tools: ['cross_check_facts']
     });
+  }
+
+  generateMarkdownReport(verification) {
+    const lines = [
+      `# Fact Verifier Agent 报告`,
+      ``,
+      `## 验证摘要`,
+      `- ✅ **已确认**: ${verification.confirmations?.length || 0} 项`,
+      `- ❌ **存在冲突**: ${verification.conflicts?.length || 0} 项`,
+      `- ⚠️ **覆盖空白**: ${verification.coverage_gaps?.length || 0} 项`,
+      ``
+    ];
+
+    if (verification.confirmations && verification.confirmations.length > 0) {
+      lines.push(`## ✅ 已确认的事实`);
+      lines.push(``);
+      for (const item of verification.confirmations) {
+        lines.push(`### ${item.claim || 'Unknown claim'}`);
+        lines.push(`- **来源**: ${item.sources?.join(', ') || 'Unknown'}`);
+        lines.push(`- **确认程度**: ${(item.confidence * 100).toFixed(0)}%`);
+        if (item.explanation) {
+          lines.push(`- **说明**: ${item.explanation}`);
+        }
+        lines.push(``);
+      }
+    }
+
+    if (verification.conflicts && verification.conflicts.length > 0) {
+      lines.push(`## ❌ 存在冲突的事实`);
+      lines.push(``);
+      for (const item of verification.conflicts) {
+        lines.push(`### ${item.claim || 'Unknown claim'}`);
+        lines.push(`- **冲突来源 1**: ${item.sources?.[0] || 'Unknown'}`);
+        lines.push(`- **冲突来源 2**: ${item.sources?.[1] || 'Unknown'}`);
+        if (item.explanation) {
+          lines.push(`- **说明**: ${item.explanation}`);
+        }
+        lines.push(``);
+      }
+    }
+
+    if (verification.coverage_gaps && verification.coverage_gaps.length > 0) {
+      lines.push(`## ⚠️ 需要更多证据的领域`);
+      lines.push(``);
+      for (const item of verification.coverage_gaps) {
+        lines.push(`- **缺失领域**: ${item.claim || 'Unknown'}`);
+        if (item.suggested_sources) {
+          lines.push(`- **建议来源**: ${item.suggested_sources.join(', ')}`);
+        }
+      }
+      lines.push(``);
+    }
+
+    return lines.join('\n');
   }
 
   async execute(input) {
@@ -387,12 +604,16 @@ class FactVerifierAgent extends BaseAgent {
           confirmed: verification.confirmations.length,
           conflicted: verification.conflicts.length,
           gaps: verification.coverage_gaps.length
-        }
+        },
+        markdown_report: this.generateMarkdownReport(verification)
       };
       this.status = AgentStatus.COMPLETED;
     } catch (error) {
       this.error = error;
       this.status = AgentStatus.FAILED;
+      this.result = {
+        markdown_report: `# Fact Verifier Agent 报告\n\n**错误**: ${error.message}`
+      };
     }
     
     this.endTime = Date.now();
@@ -410,12 +631,98 @@ class SynthesizerAgent extends BaseAgent {
     });
   }
 
+  generateMarkdownReport(input) {
+    const { question, evidenceItems, verification, evaluation, agentReports } = input;
+    
+    const lines = [
+      `# 研究报告`,
+      `**问题**: ${question}`,
+      `**生成时间**: ${new Date().toISOString()}`,
+      ``
+    ];
+
+    lines.push(`---\n`);
+    lines.push(`## 📊 各Agent报告汇总\n`);
+    
+    if (agentReports) {
+      if (agentReports.web_researcher) {
+        lines.push(`## Web Researcher Agent 报告\n`);
+        lines.push(agentReports.web_researcher);
+        lines.push(`\n---\n`);
+      }
+      
+      if (agentReports.deep_analyst) {
+        lines.push(`## Deep Analyst Agent 报告\n`);
+        lines.push(agentReports.deep_analyst);
+        lines.push(`\n---\n`);
+      }
+      
+      if (agentReports.multimedia) {
+        lines.push(`## Multimedia Agent 报告\n`);
+        lines.push(agentReports.multimedia);
+        lines.push(`\n---\n`);
+      }
+      
+      if (agentReports.fact_verifier) {
+        lines.push(`## Fact Verifier Agent 报告\n`);
+        lines.push(agentReports.fact_verifier);
+        lines.push(`\n---\n`);
+      }
+    }
+
+    const keyClaims = this.extractKeyClaims(evidenceItems || []);
+    const conclusion = this.buildConclusion(question, evidenceItems || [], verification);
+    const confidence = this.calculateConfidence(verification, evaluation);
+    
+    lines.push(`---\n`);
+    lines.push(`## 🎯 结论\n`);
+    lines.push(conclusion);
+    lines.push(``);
+    
+    lines.push(`## 📈 置信度\n`);
+    lines.push(`- **置信度**: ${(confidence * 100).toFixed(0)}%`);
+    lines.push(``);
+    
+    if (keyClaims.length > 0) {
+      lines.push(`## 🔑 关键发现\n`);
+      for (const claim of keyClaims) {
+        lines.push(`- ${claim.claim} (来源: ${claim.source}, 可信度: ${(claim.authority * 100).toFixed(0)}%)`);
+      }
+      lines.push(``);
+    }
+    
+    if (verification?.conflicts && verification.conflicts.length > 0) {
+      lines.push(`## ⚠️ 冲突信息\n`);
+      for (const conflict of verification.conflicts) {
+        lines.push(`- ${conflict.claim}`);
+      }
+      lines.push(``);
+    }
+    
+    if (evaluation?.risk_notes && evaluation.risk_notes.length > 0) {
+      lines.push(`## 📝 不确定性说明\n`);
+      for (const note of evaluation.risk_notes) {
+        lines.push(`- ${note}`);
+      }
+      lines.push(``);
+    }
+    
+    lines.push(`---\n`);
+    lines.push(`## 📚 参考来源\n`);
+    for (const source of this.buildSourceList(evidenceItems || [])) {
+      lines.push(`- ${source.title} (${source.source_type})`);
+    }
+    lines.push(``);
+    
+    return lines.join('\n');
+  }
+
   async execute(input) {
     this.status = AgentStatus.RUNNING;
     this.startTime = Date.now();
     
     try {
-      const { question, evidenceItems, verification, evaluation } = input;
+      const { question, evidenceItems, verification, evaluation, agentReports } = input;
       
       const keyClaims = this.extractKeyClaims(evidenceItems || []);
       const conclusion = this.buildConclusion(question, evidenceItems || [], verification);
@@ -428,12 +735,16 @@ class SynthesizerAgent extends BaseAgent {
         confidence,
         sources: this.buildSourceList(evidenceItems || []),
         conflicts: verification?.conflicts || [],
-        uncertainty: evaluation?.risk_notes || []
+        uncertainty: evaluation?.risk_notes || [],
+        markdown_report: this.generateMarkdownReport({ question, evidenceItems, verification, evaluation, agentReports })
       };
       this.status = AgentStatus.COMPLETED;
     } catch (error) {
       this.error = error;
       this.status = AgentStatus.FAILED;
+      this.result = {
+        markdown_report: `# Synthesizer Agent 报告\n\n**错误**: ${error.message}`
+      };
     }
     
     this.endTime = Date.now();
@@ -476,6 +787,108 @@ class SynthesizerAgent extends BaseAgent {
   }
 }
 
+// Tool Creator Agent - 负责工具创建和管理
+class ToolCreatorAgent extends BaseAgent {
+  constructor(config) {
+    super({
+      ...config,
+      type: AgentType.TOOL_CREATOR,
+      tools: []
+    });
+  }
+
+  generateMarkdownReport(toolResults) {
+    const lines = [
+      `# Tool Creator Agent 报告`,
+      `**工具创建结果**: ${toolResults.length} 个工具`,
+      ``
+    ];
+
+    for (const tool of toolResults) {
+      lines.push(`## ${tool.name}`);
+      lines.push(`- **ID**: ${tool.id}`);
+      lines.push(`- **描述**: ${tool.description}`);
+      lines.push(`- **参数**: ${JSON.stringify(tool.parameters || {})}`);
+      lines.push(`- **状态**: ${tool.status || 'created'}`);
+      lines.push(``);
+    }
+
+    return lines.join('\n');
+  }
+
+  async execute(input) {
+    this.status = AgentStatus.RUNNING;
+    this.startTime = Date.now();
+    
+    try {
+      const { toolSpecs } = input;
+      const createdTools = [];
+      
+      for (const spec of toolSpecs || []) {
+        const tool = this.createTool(spec);
+        if (tool) {
+          createdTools.push(tool);
+        }
+      }
+      
+      this.result = {
+        tools: createdTools,
+        count: createdTools.length,
+        markdown_report: this.generateMarkdownReport(createdTools)
+      };
+      this.status = AgentStatus.COMPLETED;
+    } catch (error) {
+      this.error = error;
+      this.status = AgentStatus.FAILED;
+      this.result = {
+        markdown_report: `# Tool Creator Agent 报告\n\n**错误**: ${error.message}`
+      };
+    }
+    
+    this.endTime = Date.now();
+    return this.getResult();
+  }
+
+  createTool(spec) {
+    const toolId = spec.id || `tool_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const implementation = spec.implementation || this.generateToolImplementation(spec);
+    
+    const toolDefinition = {
+      id: toolId,
+      name: spec.name || `Tool ${toolId}`,
+      description: spec.description || 'Generated tool',
+      parameters: spec.parameters || [],
+      execute: implementation
+    };
+    
+    // 注册工具
+    if (typeof ToolRegistry.registerTool === 'function') {
+      ToolRegistry.registerTool(toolDefinition);
+    }
+    
+    return {
+      ...toolDefinition,
+      status: 'created',
+      created_at: new Date().toISOString()
+    };
+  }
+
+  generateToolImplementation(spec) {
+    // 基于规范生成工具实现
+    return async function toolImplementation(input) {
+      // 生成的工具实现逻辑
+      return {
+        success: true,
+        result: `Tool ${spec.name} executed with input: ${JSON.stringify(input)}`,
+        metadata: {
+          tool_id: spec.id,
+          executed_at: new Date().toISOString()
+        }
+      };
+    };
+  }
+}
+
 // Agent 工厂函数
 function createAgent(type, config = {}) {
   const baseConfig = {
@@ -498,6 +911,8 @@ function createAgent(type, config = {}) {
       return new FactVerifierAgent(baseConfig);
     case AgentType.SYNTHESIZER:
       return new SynthesizerAgent(baseConfig);
+    case AgentType.TOOL_CREATOR:
+      return new ToolCreatorAgent(baseConfig);
     default:
       throw new Error(`Unknown agent type: ${type}`);
   }
@@ -659,7 +1074,13 @@ function createResearchWorkflow() {
       question: state.question,
       evidenceItems: state.analysisResult?.result?.reads || [],
       verification: state.verificationResult?.result,
-      evaluation: { is_sufficient: true, risk_notes: [] }
+      evaluation: { is_sufficient: true, risk_notes: [] },
+      agentReports: {
+        web_researcher: state.searchResult?.result?.markdown_report || '',
+        deep_analyst: state.analysisResult?.result?.markdown_report || '',
+        multimedia: state.multimediaResult?.result?.markdown_report || '',
+        fact_verifier: state.verificationResult?.result?.markdown_report || ''
+      }
     });
     return { ...state, synthesisResult };
   });
@@ -695,7 +1116,8 @@ class AgentSystem {
       AgentType.DEEP_ANALYST,
       AgentType.MULTIMEDIA,
       AgentType.FACT_VERIFIER,
-      AgentType.SYNTHESIZER
+      AgentType.SYNTHESIZER,
+      AgentType.TOOL_CREATOR
     ];
 
     for (const type of agentTypes) {
@@ -1230,6 +1652,181 @@ function dedupeBy(items, getKey) {
   return Array.from(map.values());
 }
 
+function createRuntimeTaskId(agentId, taskType) {
+  return `${agentId}:${taskType}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createAgentRuntime(agentRegistry) {
+  const agents = {};
+  for (const [agentId, config] of Object.entries(agentRegistry || {})) {
+    agents[agentId] = {
+      id: config.id || agentId,
+      prompt: config.prompt || "",
+      status: AgentStatus.IDLE,
+      current_task_id: null,
+      inbox: [],
+      outbox: [],
+      completed_tasks: 0,
+      failed_tasks: 0,
+      last_result: null,
+      last_error: null,
+      last_updated_at: new Date().toISOString()
+    };
+  }
+
+  return {
+    agents,
+    tasks: [],
+    messages: []
+  };
+}
+
+function pushRuntimeMessage(runtime, message) {
+  const entry = {
+    id: `msg:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    at: new Date().toISOString(),
+    ...message
+  };
+  runtime.messages.push(entry);
+
+  if (entry.to && runtime.agents[entry.to]) {
+    runtime.agents[entry.to].inbox.push(entry);
+    runtime.agents[entry.to].last_updated_at = entry.at;
+  }
+  if (entry.from && runtime.agents[entry.from]) {
+    runtime.agents[entry.from].outbox.push(entry);
+    runtime.agents[entry.from].last_updated_at = entry.at;
+  }
+
+  return entry;
+}
+
+function dispatchAgentTask(runtime, { from = "supervisor", agentId, taskType, input = null, metadata = {} }) {
+  if (!runtime?.agents?.[agentId]) {
+    throw new Error(`Unknown runtime agent: ${agentId}`);
+  }
+
+  const task = {
+    id: createRuntimeTaskId(agentId, taskType),
+    agent_id: agentId,
+    from,
+    task_type: taskType,
+    status: "running",
+    input,
+    metadata,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    result: null,
+    error: null
+  };
+
+  runtime.tasks.push(task);
+  runtime.agents[agentId].status = AgentStatus.RUNNING;
+  runtime.agents[agentId].current_task_id = task.id;
+  runtime.agents[agentId].last_error = null;
+  runtime.agents[agentId].last_updated_at = task.updated_at;
+
+  pushRuntimeMessage(runtime, {
+    type: "task_dispatched",
+    from,
+    to: agentId,
+    task_id: task.id,
+    task_type: taskType,
+    metadata
+  });
+
+  return task;
+}
+
+function completeAgentTask(runtime, taskId, result = null, metadata = {}) {
+  const task = runtime?.tasks?.find((item) => item.id === taskId);
+  if (!task) {
+    throw new Error(`Unknown runtime task: ${taskId}`);
+  }
+
+  task.status = "completed";
+  task.result = result;
+  task.metadata = { ...task.metadata, ...metadata };
+  task.updated_at = new Date().toISOString();
+
+  const agent = runtime.agents[task.agent_id];
+  agent.status = AgentStatus.COMPLETED;
+  agent.current_task_id = null;
+  agent.completed_tasks += 1;
+  agent.last_result = result;
+  agent.last_updated_at = task.updated_at;
+
+  pushRuntimeMessage(runtime, {
+    type: "task_completed",
+    from: task.agent_id,
+    to: task.from,
+    task_id: task.id,
+    task_type: task.task_type,
+    metadata
+  });
+
+  return task;
+}
+
+function failAgentTask(runtime, taskId, error, metadata = {}) {
+  const task = runtime?.tasks?.find((item) => item.id === taskId);
+  if (!task) {
+    throw new Error(`Unknown runtime task: ${taskId}`);
+  }
+
+  task.status = "failed";
+  task.error = typeof error === "string" ? error : error?.message || "unknown error";
+  task.metadata = { ...task.metadata, ...metadata };
+  task.updated_at = new Date().toISOString();
+
+  const agent = runtime.agents[task.agent_id];
+  agent.status = AgentStatus.FAILED;
+  agent.current_task_id = null;
+  agent.failed_tasks += 1;
+  agent.last_error = task.error;
+  agent.last_updated_at = task.updated_at;
+
+  pushRuntimeMessage(runtime, {
+    type: "task_failed",
+    from: task.agent_id,
+    to: task.from,
+    task_id: task.id,
+    task_type: task.task_type,
+    metadata: {
+      ...metadata,
+      error: task.error
+    }
+  });
+
+  return task;
+}
+
+function getAgentRuntimeSnapshot(runtime) {
+  return {
+    tasks: runtime.tasks.map((task) => ({
+      id: task.id,
+      agent_id: task.agent_id,
+      from: task.from,
+      task_type: task.task_type,
+      status: task.status,
+      created_at: task.created_at,
+      updated_at: task.updated_at,
+      metadata: task.metadata
+    })),
+    agents: Object.values(runtime.agents).map((agent) => ({
+      id: agent.id,
+      status: agent.status,
+      current_task_id: agent.current_task_id,
+      completed_tasks: agent.completed_tasks,
+      failed_tasks: agent.failed_tasks,
+      inbox_count: agent.inbox.length,
+      outbox_count: agent.outbox.length,
+      last_updated_at: agent.last_updated_at
+    })),
+    messages: runtime.messages.slice(-30)
+  };
+}
+
 function routeCandidate(candidate) {
   const contentType = candidate.content_type || candidate.source_type;
   if (contentType === "video") {
@@ -1394,17 +1991,35 @@ function createAgentRegistry() {
   };
 }
 
-async function runWebResearcher(plan, queries, telemetry) {
+async function runWebResearcher(plan, queries, telemetry, runtime = null) {
   const startedAt = Date.now();
   const queryReports = await Promise.all(queries.map(async (query) => {
+    const runtimeTask = runtime
+      ? dispatchAgentTask(runtime, {
+          from: "supervisor",
+          agentId: "web_researcher",
+          taskType: "discover_sources",
+          input: { query, connector_ids: plan.chosen_connector_ids },
+          metadata: { query }
+        })
+      : null;
     try {
       const candidates = await invokeSourceTool({
         action: "discover",
         query,
         connector_ids: plan.chosen_connector_ids
       });
+      if (runtimeTask) {
+        completeAgentTask(runtime, runtimeTask.id, {
+          query,
+          candidate_count: candidates.length
+        });
+      }
       return { query, candidates, error: null };
     } catch (error) {
+      if (runtimeTask) {
+        failAgentTask(runtime, runtimeTask.id, error, { query });
+      }
       return { query, candidates: [], error };
     }
   }));
@@ -1429,7 +2044,7 @@ async function runWebResearcher(plan, queries, telemetry) {
     .sort((left, right) => right.score - left.score);
 }
 
-async function runSpecialistReads(selected, telemetry) {
+async function runSpecialistReads(selected, telemetry, runtime = null) {
   const deepCandidates = selected.filter((item) => routeCandidate(item) === "deep_analyst");
   const videoCandidates = selected.filter((item) => routeCandidate(item) === "multimedia");
   const forumCandidates = selected.filter((item) => routeCandidate(item) === "fact_verifier");
@@ -1437,6 +2052,21 @@ async function runSpecialistReads(selected, telemetry) {
   async function readGroup(agent, candidates) {
     const startedAt = Date.now();
     const settled = await Promise.all(candidates.map(async (candidate) => {
+      const taskType = (candidate.content_type || candidate.source_type) === "video"
+        ? "extract_multimedia_evidence"
+        : "read_source";
+      const runtimeTask = runtime
+        ? dispatchAgentTask(runtime, {
+            from: "supervisor",
+            agentId: agent,
+            taskType,
+            input: { candidate },
+            metadata: {
+              source_id: candidate.id,
+              connector: candidate.connector
+            }
+          })
+        : null;
       try {
         const toolId = (candidate.content_type || candidate.source_type) === "video"
           ? "extract_video_intel"
@@ -1445,8 +2075,19 @@ async function runSpecialistReads(selected, telemetry) {
         if (!execution.success) {
           throw new Error(execution.error?.message || `${toolId} failed`);
         }
+        if (runtimeTask) {
+          completeAgentTask(runtime, runtimeTask.id, {
+            source_id: candidate.id,
+            tool: toolId
+          });
+        }
         return { candidate, read: execution.data, error: null };
       } catch (error) {
+        if (runtimeTask) {
+          failAgentTask(runtime, runtimeTask.id, error, {
+            source_id: candidate.id
+          });
+        }
         return { candidate, read: null, error };
       }
     }));
@@ -1495,12 +2136,76 @@ async function runSpecialistReads(selected, telemetry) {
   };
 }
 
+async function runFactVerifierReview(verification, telemetry, runtime = null) {
+  const reviewItems = [
+    ...(verification?.conflicts || []).map((item) => ({ kind: "conflict", item })),
+    ...(verification?.coverage_gaps || []).map((item) => ({ kind: "coverage_gap", item }))
+  ];
+
+  const tasks = reviewItems.map(({ kind, item }) => {
+    const runtimeTask = runtime
+      ? dispatchAgentTask(runtime, {
+          from: "supervisor",
+          agentId: "fact_verifier",
+          taskType: "review_evidence_consistency",
+          input: {
+            key: item.key,
+            kind,
+            preferred_claim: item.preferred_fact?.claim || null
+          },
+          metadata: {
+            kind,
+            key: item.key
+          }
+        })
+      : null;
+
+    const resolution = {
+      key: item.key,
+      kind,
+      preferred_source: item.comparison?.preferred_source || item.preferred_fact?.source_id || null,
+      preferred_claim: item.preferred_fact?.claim || null,
+      reason: item.reason,
+      status: kind === "conflict" ? "needs_disclosure" : "needs_more_sources",
+      competing_sources: item.comparison?.competing_sources || []
+    };
+
+    if (runtimeTask) {
+      completeAgentTask(runtime, runtimeTask.id, resolution);
+    }
+
+    return resolution;
+  });
+
+  telemetry.events.push({
+    stage: "fact_verifier_review",
+    task_count: tasks.length,
+    conflict_count: verification?.conflicts?.length || 0,
+    coverage_gap_count: verification?.coverage_gaps?.length || 0
+  });
+
+  return {
+    tasks,
+    summary: {
+      conflicts: verification?.conflicts?.length || 0,
+      coverage_gaps: verification?.coverage_gaps?.length || 0,
+      review_count: tasks.length
+    }
+  };
+}
+
 module.exports = {
+  createAgentRuntime,
+  dispatchAgentTask,
+  completeAgentTask,
+  failAgentTask,
+  getAgentRuntimeSnapshot,
   createAgentRegistry,
   routeCandidate,
   selectCandidates,
   runWebResearcher,
   runSpecialistReads,
+  runFactVerifierReview,
   verifyEvidenceUnits,
   evaluateResearch,
   AgentSystem,

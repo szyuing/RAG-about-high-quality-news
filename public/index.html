@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>深度网页研究台</title>
+    <title>Deep Web Search Console</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
@@ -12,25 +12,25 @@
     <main class="shell">
       <section class="hero">
         <div class="hero-copy">
-          <p class="eyebrow">深度网页研究台</p>
+          <p class="eyebrow">Deep Web Search</p>
           <h1>先规划，再搜索，再组织证据。</h1>
           <p class="hero-text">
-            当前版本已经切到真实来源接入层。研究流程会先根据问题主题判断优先网站，再通过统一 source tool 并行拉取候选，
-            然后按内容本身的相关性和证据价值决定深读、转写和冲突组织。
+            当前版本已经接入真实来源、统一 source tool、多轮 research loop、Scratchpad、
+            verifier follow-up、experience memory 和轻量 knowledge graph。
           </p>
         </div>
         <div class="hero-card">
           <div class="metric">
             <span>核心链路</span>
-            <strong>规划 / 统一 source tool / 深读 / 核验 / 综合</strong>
+            <strong>Planner / Search / Read / Verify / Evaluate / Synthesize</strong>
           </div>
           <div class="metric">
             <span>当前接入</span>
-            <strong>Bing Web、IT之家、Hacker News、SegmentFault、arXiv、Bilibili、抖音、TED</strong>
+            <strong>Bing Web, IT Home, Hacker News, SegmentFault, arXiv, Bilibili, Douyin, TED</strong>
           </div>
           <div class="metric">
             <span>输出模式</span>
-            <strong>快速回答 / 深度研究摘要</strong>
+            <strong>Quick Answer / Deep Research Summary</strong>
           </div>
         </div>
       </section>
@@ -38,12 +38,12 @@
       <section class="workspace">
         <div class="panel input-panel">
           <div class="panel-header">
-            <h2>研究控制台</h2>
+            <h2>Research Console</h2>
             <span id="healthBadge" class="badge">等待启动</span>
           </div>
           <label class="field">
             <span>研究问题</span>
-            <textarea id="questionInput" rows="6" placeholder="例如：Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？"></textarea>
+            <textarea id="questionInput" rows="6" placeholder="例如：Sora 模型现在的生成时长上限是多少？相较发布时有哪些更新？"></textarea>
           </label>
           <div class="controls">
             <label class="mode-toggle">
@@ -71,7 +71,7 @@
           <div class="sample-block">
             <div class="sample-header">
               <h3>来源能力</h3>
-              <p>当前真实接入的中英文来源。</p>
+              <p>当前已接入的真实来源与能力。</p>
             </div>
             <div id="capabilityList" class="card-list"></div>
           </div>
@@ -106,7 +106,22 @@
               <div class="section-header">
                 <h3>研究轮次</h3>
               </div>
-              <div id="roundsOutput" class="timeline empty-state">运行后展示多代理闭环。</div>
+              <div id="roundsOutput" class="timeline empty-state">运行后展示多轮闭环。</div>
+            </section>
+
+            <section class="result-section two-column">
+              <article class="sub-panel">
+                <div class="section-header">
+                  <h3>Agent Runtime</h3>
+                </div>
+                <div id="agentRuntimeOutput" class="card-list empty-state">等待 agent 任务轨迹...</div>
+              </article>
+              <article class="sub-panel">
+                <div class="section-header">
+                  <h3>Scratchpad Timeline</h3>
+                </div>
+                <div id="scratchpadTimelineOutput" class="timeline empty-state">等待共享工作区状态...</div>
+              </article>
             </section>
 
             <section class="result-section two-column">
@@ -124,6 +139,21 @@
               </article>
             </section>
 
+            <section class="result-section two-column">
+              <article class="sub-panel">
+                <div class="section-header">
+                  <h3>Verifier Follow-ups</h3>
+                </div>
+                <div id="verifierOutput" class="card-list empty-state">等待冲突和覆盖缺口处理记录...</div>
+              </article>
+              <article class="sub-panel">
+                <div class="section-header">
+                  <h3>Knowledge Graph</h3>
+                </div>
+                <div id="knowledgeGraphOutput" class="card-list empty-state">等待知识图谱版本摘要...</div>
+              </article>
+            </section>
+
             <section class="result-section">
               <div class="section-header">
                 <h3>经验记忆</h3>
@@ -136,4 +166,4 @@
     </main>
     <script src="/app.js"></script>
   </body>
-  </html>
+</html>

@@ -81,7 +81,15 @@ function buildEvidenceSpans(read, quotes) {
     locator: quote.locator
   }));
 
-  return [...sectionSpans, ...transcriptSpans, ...quoteSpans].filter((item) => item.text);
+  const visualSpans = (read.visual_observations || []).slice(0, 4).map((item, index) => ({
+    id: `${read.source_id}:visual:${index + 1}`,
+    kind: "visual_observation",
+    label: `Visual observation ${index + 1}`,
+    text: item,
+    locator: (read.page_images || [])[index] || null
+  }));
+
+  return [...sectionSpans, ...transcriptSpans, ...quoteSpans, ...visualSpans].filter((item) => item.text);
 }
 
 function buildClaimRecords(read, evidenceSpans) {
@@ -115,7 +123,26 @@ function buildClaimRecords(read, evidenceSpans) {
       authority_score: stableAuthorityScore(read)
     }));
 
-  return [...factClaims, ...keyPointClaims];
+  const visualClaims = (read.visual_observations || [])
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((claim, index) => ({
+      id: `${read.source_id}:claim:visual:${index + 1}`,
+      type: "visual_observation",
+      claim,
+      subject: read.title || read.source_id,
+      value: null,
+      unit: null,
+      evidence_span_ids: evidenceSpans
+        .filter((item) => item.kind === "visual_observation")
+        .slice(0, 2)
+        .map((item) => item.id),
+      source_id: read.source_id,
+      published_at: toIsoTimestamp(read.published_at),
+      authority_score: stableAuthorityScore(read)
+    }));
+
+  return [...factClaims, ...keyPointClaims, ...visualClaims];
 }
 
 function createEvidenceUnit(read, candidate = {}) {
@@ -135,6 +162,7 @@ function createEvidenceUnit(read, candidate = {}) {
     transcript: read.transcript || [],
     key_points: read.key_points || [],
     key_frames: read.key_frames || [],
+    visual_observations: read.visual_observations || [],
     facts: (read.facts || []).map((fact) => ({ ...fact, source_id: read.source_id })),
     quotes,
     evidence_spans: evidenceSpans,
@@ -146,6 +174,8 @@ function createEvidenceUnit(read, candidate = {}) {
       author: read.author || candidate.author || null,
       published_at: toIsoTimestamp(read.published_at || candidate.published_at),
       source_type: sourceType,
+      page_images: read.page_images || read.source_metadata?.page_images || candidate.metadata?.page_images || [],
+      preview_image: read.source_metadata?.preview_image || candidate.metadata?.preview_image || null,
       authority_score: stableAuthorityScore({
         authority_score: candidate.score,
         metadata: candidate.metadata,

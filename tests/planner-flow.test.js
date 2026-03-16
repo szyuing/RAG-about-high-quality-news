@@ -47,6 +47,29 @@ test("normalizeModelConnectorIds should keep valid ids and fill from fallback", 
   assert.deepEqual(ids, ["douyin", "bilibili", "bing_web", "ted"]);
 });
 
+test("getRelevantExperienceHints should extract boosted queries and source types from similar history", () => {
+  const hints = researchInternal.getRelevantExperienceHints(
+    "Sora current update",
+    [
+      {
+        question: "OpenAI Sora current update",
+        useful_queries: ["OpenAI Sora official", "OpenAI Sora current update"],
+        useful_source_types: ["video", "web"],
+        noisy_paths: ["no candidate returned"]
+      },
+      {
+        question: "Apple benchmark",
+        useful_queries: ["iPhone benchmark"],
+        useful_source_types: ["document"]
+      }
+    ]
+  );
+
+  assert.equal(hints.entries.length, 1);
+  assert.deepEqual(hints.boosted_source_types, ["video", "web"]);
+  assert.ok(hints.boosted_queries.includes("OpenAI Sora official"));
+});
+
 test("mergePlanWithModelSelection should replace chosen connectors with model order", () => {
   const basePlan = researchInternal.planner("美国总统特朗普 演讲视频");
   const merged = researchInternal.mergePlanWithModelSelection(basePlan, {
@@ -81,6 +104,19 @@ test("buildPlan should fall back cleanly when OPENAI_API_KEY is absent", async (
       process.env.OPENAI_API_KEY = originalApiKey;
     }
   }
+});
+
+test("planner should include experience hints in connector and query planning", () => {
+  const plan = researchInternal.planner("Sora current update", {
+    entries: [{ question: "OpenAI Sora current update", relevance: 3 }],
+    boosted_queries: ["OpenAI Sora official"],
+    boosted_source_types: ["video"],
+    avoided_patterns: ["no candidate returned"]
+  });
+
+  assert.ok(plan.initial_queries.includes("OpenAI Sora official"));
+  assert.ok(plan.experience_hints);
+  assert.ok(Array.isArray(plan.experience_hints.boosted_source_types));
 });
 
 test("requestStopDecisionFromModel should return null when OPENAI_API_KEY is absent", async () => {
@@ -163,6 +199,38 @@ test("evaluator should use stop policy thresholds instead of fixed defaults", ()
   assert.deepEqual(evaluation.missing_questions, []);
 });
 
+test("buildEvaluationScorecard should expose stop checkpoints for the custom controller", () => {
+  const scorecard = researchInternal.buildEvaluationScorecard(
+    {
+      task_goal: "test question",
+      sub_questions: ["one"],
+      stop_policy: {
+        min_source_types: 2,
+        min_evidence_items: 3,
+        max_rounds: 2,
+        overall_coverage_threshold: 0.2,
+        max_relevant_conflicts: 1
+      }
+    },
+    {
+      is_sufficient: false,
+      metrics: {
+        source_types_covered: 1,
+        evidence_units: 2,
+        overall_coverage: 0.15,
+        conflict_count: 0
+      }
+    },
+    { confirmations: [], conflicts: [], coverage_gaps: [] },
+    1,
+    null
+  );
+
+  assert.equal(scorecard.status, "needs_more_evidence");
+  assert.equal(scorecard.checkpoints.evidence_depth.target, 3);
+  assert.equal(scorecard.checkpoints.rounds.remaining, 1);
+});
+
 test("createScratchpad should expose a shared workspace for agents", () => {
   const scratchpad = researchInternal.createScratchpad({
     sub_questions: ["one", "two"]
@@ -229,6 +297,19 @@ test("mergeEvaluationWithStopDecision should let llm stop the loop when evidence
   assert.equal(merged.stop_controller, "llm");
 });
 
+test("deriveStopOutcome should normalize stop reason for the custom controller", () => {
+  const stopState = researchInternal.deriveStopOutcome({
+    is_sufficient: false,
+    next_best_action: "stop_with_partial_answer",
+    stop_controller: "heuristic",
+    llm_stop_decision: null
+  });
+
+  assert.equal(stopState.should_stop_now, false);
+  assert.equal(stopState.should_answer_now, true);
+  assert.equal(stopState.reason, "max_rounds_reached");
+});
+
 test("buildEvidenceItems should project unified evidence fields", () => {
   const reads = [
     {
@@ -242,6 +323,8 @@ test("buildEvidenceItems should project unified evidence fields", () => {
       published_at: "2026-03-15T10:00:00Z",
       markdown: "This source states the benchmark improved by 20 percent across two tasks.",
       key_points: ["benchmark improved by 20 percent"],
+      visual_observations: ["A line chart shows the benchmark trend rising across two tasks."],
+      page_images: ["https://example.com/chart.png"],
       sections: [{ heading: "Summary", excerpt: "benchmark improved by 20 percent" }],
       facts: [{ subject: "demo", kind: "numeric_statement", claim: "improved by 20 percent", value: 20, unit: "%", authority_score: 0.8 }]
     }
@@ -253,6 +336,9 @@ test("buildEvidenceItems should project unified evidence fields", () => {
   assert.ok(Array.isArray(evidence[0].evidence_spans));
   assert.ok(Array.isArray(evidence[0].claims));
   assert.equal(evidence[0].source_metadata.connector, "bing_web");
+  assert.equal(evidence[0].source_metadata.page_images[0], "https://example.com/chart.png");
+  assert.ok(evidence[0].claims.some((item) => item.type === "visual_observation"));
+  assert.ok(evidence[0].evidence_spans.some((item) => item.kind === "visual_observation"));
 });
 
 test("crossCheckFacts should produce comparison details for conflicts", async () => {
