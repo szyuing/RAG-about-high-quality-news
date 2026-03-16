@@ -128,6 +128,7 @@ function renderFinalAnswer(result) {
   const conflicts = summary.conflicts || [];
   const uncertainty = summary.uncertainty || [];
   const dynamicTools = summary.dynamic_tools || [];
+  const stopDecision = summary.stop_decision || null;
 
   container.className = "answer-card";
   container.innerHTML = `
@@ -158,6 +159,14 @@ function renderFinalAnswer(result) {
           ${(dynamicTools.length ? dynamicTools : [{ strategy: "none", success: true, target: { url: "" }, worth_promoting: { reason: "No ephemeral tool was needed." } }])
             .map((item) => `<li>${escapeHtml(item.strategy || "tool")} | ${escapeHtml(item.success ? "success" : "failed")} | ${escapeHtml(item.target?.url || item.target?.title || "")} | ${escapeHtml(item.worth_promoting?.reason || "")}</li>`)
             .join("")}
+        </ul>
+      </section>
+      <section>
+        <h4>Stop Decision</h4>
+        <ul class="tight-list">
+          ${stopDecision
+            ? `<li>${escapeHtml(stopDecision.should_stop ? "stop" : "continue")} | ${escapeHtml(stopDecision.can_answer_accurately ? "accurate" : "not yet accurate")} | ${escapeHtml(stopDecision.reasoning || "")}</li>`
+            : "<li>No LLM stop decision available.</li>"}
         </ul>
       </section>
       <section>

@@ -21,6 +21,7 @@ const {
 const experiencePath = path.join(__dirname, "..", "data", "experience-memory.json");
 const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 const DEFAULT_PLANNER_MODEL = process.env.OPENAI_PLANNER_MODEL || "gpt-4o-mini";
+const DEFAULT_EVALUATOR_MODEL = process.env.OPENAI_EVALUATOR_MODEL || "gpt-4o-mini";
 
 function normalizeText(value) {
   return String(value || "")
@@ -427,8 +428,94 @@ function createScratchpad(plan) {
     missing_questions: [...plan.sub_questions],
     failure_paths: [],
     agent_reports: [],
+    workspace: {
+      shared_notes: [],
+      agent_workspaces: {},
+      handoffs: [],
+      decisions: [],
+      timeline: [],
+      question_status: plan.sub_questions.map((question) => ({
+        question,
+        status: "pending",
+        updated_at: null
+      }))
+    },
     stop_reason: null
   };
+}
+
+function ensureAgentWorkspace(scratchpad, agentId) {
+  if (!scratchpad.workspace.agent_workspaces[agentId]) {
+    scratchpad.workspace.agent_workspaces[agentId] = {
+      notes: [],
+      artifacts: [],
+      last_updated_at: null
+    };
+  }
+
+  return scratchpad.workspace.agent_workspaces[agentId];
+}
+
+function appendTimelineEvent(scratchpad, event) {
+  scratchpad.workspace.timeline.push({
+    at: new Date().toISOString(),
+    ...event
+  });
+}
+
+function addSharedNote(scratchpad, note) {
+  scratchpad.workspace.shared_notes.push({
+    at: new Date().toISOString(),
+    ...note
+  });
+}
+
+function recordAgentArtifact(scratchpad, agentId, artifact) {
+  const workspace = ensureAgentWorkspace(scratchpad, agentId);
+  workspace.artifacts.push({
+    at: new Date().toISOString(),
+    ...artifact
+  });
+  workspace.last_updated_at = new Date().toISOString();
+}
+
+function recordAgentNote(scratchpad, agentId, note) {
+  const workspace = ensureAgentWorkspace(scratchpad, agentId);
+  workspace.notes.push({
+    at: new Date().toISOString(),
+    ...note
+  });
+  workspace.last_updated_at = new Date().toISOString();
+}
+
+function recordHandoff(scratchpad, handoff) {
+  scratchpad.workspace.handoffs.push({
+    at: new Date().toISOString(),
+    ...handoff
+  });
+}
+
+function recordDecision(scratchpad, decision) {
+  scratchpad.workspace.decisions.push({
+    at: new Date().toISOString(),
+    ...decision
+  });
+}
+
+function updateQuestionStatus(scratchpad, resolvedQuestions, missingQuestions) {
+  const resolvedSet = new Set(resolvedQuestions || []);
+  const missingSet = new Set(missingQuestions || []);
+  scratchpad.workspace.question_status = scratchpad.workspace.question_status.map((item) => ({
+    question: item.question,
+    status: resolvedSet.has(item.question)
+      ? "resolved"
+      : missingSet.has(item.question)
+        ? "missing"
+        : item.status,
+    updated_at: resolvedSet.has(item.question) || missingSet.has(item.question)
+      ? new Date().toISOString()
+      : item.updated_at
+  }));
 }
 
 function buildEvidenceItems(reads, candidates = []) {
@@ -471,6 +558,206 @@ async function crossCheckFacts(input) {
 
 function evaluator(plan, scratchpad, evidenceItems, verification, roundsCompleted) {
   return evaluateResearch(plan, scratchpad, evidenceItems, verification, roundsCompleted);
+}
+
+function buildStopDecisionContext(plan, evidenceItems, verification, heuristicEvaluation) {
+  return {
+    question: plan.task_goal,
+    sub_questions: plan.sub_questions,
+    stop_policy: plan.stop_policy,
+    heuristic_evaluation: {
+      is_sufficient: heuristicEvaluation.is_sufficient,
+      resolved_questions: heuristicEvaluation.resolved_questions,
+      missing_questions: heuristicEvaluation.missing_questions,
+      risk_notes: heuristicEvaluation.risk_notes,
+      metrics: heuristicEvaluation.metrics
+    },
+    evidence_summary: evidenceItems.slice(0, 6).map((item) => ({
+      source_id: item.source_id,
+      title: item.title,
+      source_type: item.source_type,
+      source_metadata: {
+        connector: item.source_metadata?.connector || null,
+        platform: item.source_metadata?.platform || null,
+        published_at: item.source_metadata?.published_at || null,
+        authority_score: item.source_metadata?.authority_score || null
+      },
+      key_points: (item.key_points || []).slice(0, 3),
+      quotes: (item.quotes || []).slice(0, 2).map((quote) => quote.text),
+      claims: (item.claims || []).slice(0, 3).map((claim) => ({
+        claim: claim.claim,
+        subject: claim.subject,
+        value: claim.value,
+        unit: claim.unit
+      }))
+    })),
+    verification_summary: {
+      confirmations: (verification.confirmations || []).slice(0, 4).map((entry) => ({
+        key: entry.key,
+        preferred_claim: entry.preferred_fact?.claim,
+        reason: entry.reason
+      })),
+      conflicts: (verification.conflicts || []).slice(0, 4).map((entry) => ({
+        key: entry.key,
+        preferred_claim: entry.preferred_fact?.claim,
+        competing_sources: entry.comparison?.competing_sources || [],
+        reason: entry.reason
+      })),
+      coverage_gaps: (verification.coverage_gaps || []).slice(0, 4).map((entry) => ({
+        key: entry.key,
+        preferred_claim: entry.preferred_fact?.claim
+      }))
+    }
+  };
+}
+
+async function requestStopDecisionFromModel(plan, evidenceItems, verification, heuristicEvaluation) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || !evidenceItems.length) {
+    return null;
+  }
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      should_stop: { type: "boolean" },
+      can_answer_accurately: { type: "boolean" },
+      answerability: {
+        type: "string",
+        enum: ["sufficient", "partial", "insufficient"]
+      },
+      confidence: {
+        type: "number",
+        minimum: 0,
+        maximum: 1
+      },
+      missing_information: {
+        type: "array",
+        maxItems: 5,
+        items: { type: "string" }
+      },
+      reasoning: { type: "string" },
+      recommended_action: {
+        type: "string",
+        enum: ["synthesize_answer", "run_follow_up_search", "stop_with_partial_answer"]
+      }
+    },
+    required: [
+      "should_stop",
+      "can_answer_accurately",
+      "answerability",
+      "confidence",
+      "missing_information",
+      "reasoning",
+      "recommended_action"
+    ]
+  };
+
+  const prompt = [
+    "You are the final stop-policy evaluator for a research agent.",
+    "Decide whether the current evidence is enough to answer the user's question accurately right now.",
+    "Only set should_stop=true when the available evidence is already sufficient for an accurate answer.",
+    "If material is still missing, conflicting, or too thin, recommend continued search unless the system should stop with a partial answer.",
+    "",
+    JSON.stringify(buildStopDecisionContext(plan, evidenceItems, verification, heuristicEvaluation), null, 2)
+  ].join("\n");
+
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    signal: AbortSignal.timeout(25000),
+    body: JSON.stringify({
+      model: DEFAULT_EVALUATOR_MODEL,
+      store: false,
+      input: prompt,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "stop_decision",
+          strict: true,
+          schema
+        }
+      }
+    })
+  });
+
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || `OpenAI evaluator failed with HTTP ${response.status}`);
+  }
+
+  const rawText = extractTextFromResponsePayload(payload);
+  if (!rawText) {
+    throw new Error("OpenAI evaluator returned no text output");
+  }
+
+  return JSON.parse(rawText);
+}
+
+function mergeEvaluationWithStopDecision(heuristicEvaluation, stopDecision, roundsCompleted, maxRounds) {
+  if (!stopDecision) {
+    return {
+      ...heuristicEvaluation,
+      evaluator_mode: "fallback",
+      stop_controller: "heuristic",
+      llm_stop_decision: null
+    };
+  }
+
+  const llmSaysAccurate = Boolean(stopDecision.should_stop && stopDecision.can_answer_accurately);
+  const atMaxRounds = roundsCompleted >= maxRounds;
+  const shouldStopPartially = Boolean(
+    stopDecision.should_stop
+    && !stopDecision.can_answer_accurately
+    && stopDecision.recommended_action === "stop_with_partial_answer"
+  );
+
+  const nextBestAction = llmSaysAccurate
+    ? "synthesize_answer"
+    : shouldStopPartially
+      ? "stop_with_partial_answer"
+      : atMaxRounds
+        ? "stop_with_partial_answer"
+        : "run_follow_up_search";
+
+  return {
+    ...heuristicEvaluation,
+    is_sufficient: llmSaysAccurate,
+    missing_questions: stopDecision.missing_information.length
+      ? stopDecision.missing_information
+      : heuristicEvaluation.missing_questions,
+    risk_notes: Array.from(new Set([
+      ...heuristicEvaluation.risk_notes,
+      ...(!stopDecision.can_answer_accurately ? [`LLM evaluator: ${stopDecision.reasoning}`] : [])
+    ])),
+    next_best_action: nextBestAction,
+    reason: stopDecision.reasoning,
+    evaluator_mode: "llm",
+    stop_controller: "llm",
+    llm_stop_decision: stopDecision
+  };
+}
+
+async function runStopEvaluation(plan, scratchpad, evidenceItems, verification, roundsCompleted) {
+  const heuristicEvaluation = evaluator(plan, scratchpad, evidenceItems, verification, roundsCompleted);
+  const maxRounds = Math.max(1, plan.stop_policy?.max_rounds || 2);
+
+  try {
+    const stopDecision = await requestStopDecisionFromModel(plan, evidenceItems, verification, heuristicEvaluation);
+    return mergeEvaluationWithStopDecision(heuristicEvaluation, stopDecision, roundsCompleted, maxRounds);
+  } catch (error) {
+    return {
+      ...heuristicEvaluation,
+      evaluator_mode: "fallback",
+      stop_controller: "heuristic",
+      llm_stop_decision: null,
+      risk_notes: [...heuristicEvaluation.risk_notes, `LLM evaluator fallback: ${error.message}`]
+    };
+  }
 }
 
 function formatFact(fact) {
@@ -641,6 +928,7 @@ function synthesize(question, mode, candidates, reads, evidenceItems, verificati
       uncertainty: evaluation.risk_notes.length
         ? evaluation.risk_notes
         : ["No major unresolved evidence gaps were detected."],
+      stop_decision: evaluation.llm_stop_decision || null,
       confidence: (() => {
         const baseScore = evaluation.is_sufficient ? 0.58 : 0.38;
         const diversityBonus = Math.min(0.15, ((evaluation.metrics?.source_types_covered || 0) / 4) * 0.15);
@@ -658,6 +946,7 @@ function synthesize(question, mode, candidates, reads, evidenceItems, verificati
       })),
       task_observability: {
         stop_reason: telemetry.stop_reason,
+        stop_controller: evaluation.stop_controller || "heuristic",
         connector_health: telemetry.connector_health,
         failures: telemetry.failures.slice(0, 8)
       }
@@ -804,10 +1093,26 @@ async function emitProgress(onProgress, payload) {
 
 async function runRound(plan, question, queries, scratchpad, telemetry, onProgress) {
   scratchpad.queries_tried.push(...queries);
+  for (const query of queries) {
+    addSharedNote(scratchpad, {
+      type: "query",
+      agent: "supervisor",
+      content: query
+    });
+  }
+  appendTimelineEvent(scratchpad, {
+    type: "round_started",
+    agent: "supervisor",
+    queries
+  });
   const candidates = await runWebResearcher(plan, queries, telemetry);
   if (!candidates.length) {
     for (const query of queries) {
       scratchpad.failure_paths.push({ query, reason: "no candidate returned" });
+      recordAgentNote(scratchpad, "web_researcher", {
+        type: "failure",
+        content: `No candidate returned for query: ${query}`
+      });
     }
   }
 
@@ -815,6 +1120,12 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
   const routedTasks = selected.map((candidate) => {
     const agent = routeCandidate(candidate);
     const contentType = candidate.content_type || candidate.source_type;
+    recordHandoff(scratchpad, {
+      from: "supervisor",
+      to: agent,
+      source_id: candidate.id,
+      tool: contentType === "video" ? "extract_video_intel" : "deep_read_page"
+    });
     return {
       source_id: candidate.id,
       agent,
@@ -830,14 +1141,28 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
 
   for (const candidate of selected) {
     const contentType = candidate.content_type || candidate.source_type;
-    scratchpad.sources_read.push({
+    const sourceRecord = {
       source_id: candidate.id,
       title: candidate.title,
       content_type: contentType,
       source_type: contentType,
       connector: candidate.connector
+    };
+    scratchpad.sources_read.push(sourceRecord);
+    recordAgentArtifact(scratchpad, routeCandidate(candidate), {
+      type: "source_read",
+      source_id: candidate.id,
+      title: candidate.title,
+      content_type: contentType,
+      connector: candidate.connector
     });
   }
+
+  appendTimelineEvent(scratchpad, {
+    type: "round_completed",
+    selected_sources: selected.map((item) => item.id),
+    evidence_items: evidenceItems.length + fallback.evidence_items.length
+  });
 
   return {
     candidates,
@@ -883,9 +1208,17 @@ async function runResearch({ question, mode, onProgress }) {
     combinedEvidence = dedupeBy([...combinedEvidence, ...round.evidence_items], (item) => item.source_id);
 
     verification = await crossCheckFacts(combinedEvidence);
-    evaluation = evaluator(plan, scratchpad, combinedEvidence, verification, index + 1);
+    evaluation = await runStopEvaluation(plan, scratchpad, combinedEvidence, verification, index + 1);
+    updateQuestionStatus(scratchpad, evaluation.resolved_questions, evaluation.missing_questions);
+    recordDecision(scratchpad, {
+      type: "evaluation",
+      round: index + 1,
+      is_sufficient: evaluation.is_sufficient,
+      next_best_action: evaluation.next_best_action,
+      missing_questions: evaluation.missing_questions
+    });
 
-    scratchpad.agent_reports.push({
+    const roundAgentReport = {
       round: index + 1,
       supervisor: {
         queries,
@@ -900,6 +1233,19 @@ async function runResearch({ question, mode, onProgress }) {
         success: item.success,
         target: item.target?.url || item.target?.title || "unknown target"
       }))
+    };
+    scratchpad.agent_reports.push(roundAgentReport);
+    recordAgentArtifact(scratchpad, "supervisor", {
+      type: "round_report",
+      round: index + 1,
+      queries,
+      dispatched_tasks: round.routed_tasks
+    });
+    recordAgentArtifact(scratchpad, "fact_verifier", {
+      type: "verification_report",
+      round: index + 1,
+      conflict_count: verification.conflicts.length,
+      single_source_claims: verification.coverage_gaps.length
     });
     scratchpad.facts_collected = combinedEvidence.flatMap((item) => item.facts || []);
 
@@ -926,7 +1272,7 @@ async function runResearch({ question, mode, onProgress }) {
         success: item.success,
         target: item.target?.url || item.target?.title || "unknown target"
       })),
-      agent_reports: scratchpad.agent_reports[scratchpad.agent_reports.length - 1]
+      agent_reports: roundAgentReport
     };
     rounds.push(roundSummary);
 
@@ -945,7 +1291,9 @@ async function runResearch({ question, mode, onProgress }) {
     });
 
     if (evaluation.is_sufficient) {
-      telemetry.stop_reason = "stop_policy_satisfied";
+      telemetry.stop_reason = evaluation.stop_controller === "llm"
+        ? "llm_stop_decision"
+        : "stop_policy_satisfied";
       break;
     }
   }
@@ -981,6 +1329,10 @@ async function runResearch({ question, mode, onProgress }) {
   }
 
   scratchpad.stop_reason = telemetry.stop_reason;
+  recordDecision(scratchpad, {
+    type: "stop_reason",
+    value: telemetry.stop_reason
+  });
   for (const connectorId of plan.chosen_connector_ids) {
     const failures = telemetry.failures.filter((item) => item.connector === connectorId || item.stage === "discover");
     telemetry.connector_health[connectorId] = {
@@ -1040,8 +1392,14 @@ module.exports = {
     buildPlan,
     planner,
     buildEvidenceItems,
+    buildStopDecisionContext,
+    requestStopDecisionFromModel,
+    mergeEvaluationWithStopDecision,
+    runStopEvaluation,
     crossCheckFacts,
     evaluator,
-    routeCandidate
+    routeCandidate,
+    createScratchpad,
+    updateQuestionStatus
   }
 };

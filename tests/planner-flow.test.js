@@ -83,6 +83,48 @@ test("buildPlan should fall back cleanly when OPENAI_API_KEY is absent", async (
   }
 });
 
+test("requestStopDecisionFromModel should return null when OPENAI_API_KEY is absent", async () => {
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+
+  try {
+    const decision = await researchInternal.requestStopDecisionFromModel(
+      {
+        task_goal: "test question",
+        sub_questions: ["one"],
+        stop_policy: { max_rounds: 2 }
+      },
+      [
+        {
+          source_id: "source-1",
+          title: "Demo source",
+          source_type: "web",
+          source_metadata: { connector: "bing_web", authority_score: 0.8 },
+          key_points: ["one"],
+          quotes: [],
+          claims: []
+        }
+      ],
+      { confirmations: [], conflicts: [], coverage_gaps: [] },
+      {
+        is_sufficient: false,
+        resolved_questions: [],
+        missing_questions: ["one"],
+        risk_notes: [],
+        metrics: {}
+      }
+    );
+
+    assert.equal(decision, null);
+  } finally {
+    if (originalApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalApiKey;
+    }
+  }
+});
+
 test("resolveDiscoverConnectors should only keep planner-selected connectors", () => {
   const connectors = sourceInternal.resolveDiscoverConnectors(["douyin", "bilibili", "missing"]);
   assert.deepEqual(connectors.map((item) => item.id), ["bilibili", "douyin"]);
@@ -119,6 +161,72 @@ test("evaluator should use stop policy thresholds instead of fixed defaults", ()
   const evaluation = researchInternal.evaluator(plan, scratchpad, evidenceItems, verification, 1);
   assert.equal(evaluation.is_sufficient, true);
   assert.deepEqual(evaluation.missing_questions, []);
+});
+
+test("createScratchpad should expose a shared workspace for agents", () => {
+  const scratchpad = researchInternal.createScratchpad({
+    sub_questions: ["one", "two"]
+  });
+
+  assert.ok(scratchpad.workspace);
+  assert.deepEqual(Object.keys(scratchpad.workspace.agent_workspaces), []);
+  assert.deepEqual(
+    scratchpad.workspace.question_status,
+    [
+      { question: "one", status: "pending", updated_at: null },
+      { question: "two", status: "pending", updated_at: null }
+    ]
+  );
+  assert.deepEqual(scratchpad.workspace.shared_notes, []);
+  assert.deepEqual(scratchpad.workspace.handoffs, []);
+  assert.deepEqual(scratchpad.workspace.decisions, []);
+  assert.deepEqual(scratchpad.workspace.timeline, []);
+});
+
+test("updateQuestionStatus should sync evaluation coverage into the shared workspace", () => {
+  const scratchpad = researchInternal.createScratchpad({
+    sub_questions: ["covered", "missing"]
+  });
+
+  researchInternal.updateQuestionStatus(scratchpad, ["covered"], ["missing"]);
+
+  const covered = scratchpad.workspace.question_status.find((item) => item.question === "covered");
+  const missing = scratchpad.workspace.question_status.find((item) => item.question === "missing");
+
+  assert.equal(covered.status, "resolved");
+  assert.match(covered.updated_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(missing.status, "missing");
+  assert.match(missing.updated_at, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("mergeEvaluationWithStopDecision should let llm stop the loop when evidence is sufficient", () => {
+  const merged = researchInternal.mergeEvaluationWithStopDecision(
+    {
+      is_sufficient: false,
+      resolved_questions: [],
+      missing_questions: ["one"],
+      risk_notes: ["thin evidence"],
+      next_best_action: "run_follow_up_search",
+      reason: "heuristic fallback",
+      metrics: {}
+    },
+    {
+      should_stop: true,
+      can_answer_accurately: true,
+      answerability: "sufficient",
+      confidence: 0.87,
+      missing_information: [],
+      reasoning: "The evidence is enough for an accurate answer.",
+      recommended_action: "synthesize_answer"
+    },
+    1,
+    2
+  );
+
+  assert.equal(merged.is_sufficient, true);
+  assert.equal(merged.next_best_action, "synthesize_answer");
+  assert.equal(merged.evaluator_mode, "llm");
+  assert.equal(merged.stop_controller, "llm");
 });
 
 test("buildEvidenceItems should project unified evidence fields", () => {

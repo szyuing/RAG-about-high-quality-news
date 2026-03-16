@@ -51,6 +51,9 @@ chromadb/
 faiss_index/
 indexes/
 storage/
+data/session_*.json
+data/system.json
+data/agent_*.json
 
 # =========================
 # Secrets (一定不要上传)
