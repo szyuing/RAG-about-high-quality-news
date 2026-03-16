@@ -727,12 +727,98 @@ class AgentSystem {
   }
 
   getSystemStatus() {
+    const agents = Array.from(this.agents.values());
+    const activeAgents = agents.filter(a => a.status === AgentStatus.RUNNING);
+    const completedAgents = agents.filter(a => a.status === AgentStatus.COMPLETED);
+    const failedAgents = agents.filter(a => a.status === AgentStatus.FAILED);
+    
     return {
       agents: this.getAllAgents(),
       totalTasks: this.taskHistory.length,
-      activeAgents: Array.from(this.agents.values()).filter(a => a.status === AgentStatus.RUNNING).length,
-      workflows: Array.from(this.workflows.keys())
+      activeAgents: activeAgents.length,
+      completedAgents: completedAgents.length,
+      failedAgents: failedAgents.length,
+      workflows: Array.from(this.workflows.keys()),
+      systemHealth: this.getSystemHealth(),
+      performanceMetrics: this.getPerformanceMetrics()
     };
+  }
+
+  // 系统健康检查
+  getSystemHealth() {
+    const agents = Array.from(this.agents.values());
+    const failedAgents = agents.filter(a => a.status === AgentStatus.FAILED);
+    const totalAgents = agents.length;
+    const failureRate = totalAgents > 0 ? failedAgents.length / totalAgents : 0;
+    
+    let status = 'healthy';
+    if (failureRate > 0.5) {
+      status = 'critical';
+    } else if (failureRate > 0.2) {
+      status = 'warning';
+    }
+    
+    return {
+      status,
+      failureRate: Number(failureRate.toFixed(2)),
+      totalAgents,
+      failedAgents: failedAgents.length,
+      timestamp: Date.now()
+    };
+  }
+
+  // 性能指标
+  getPerformanceMetrics() {
+    const agents = Array.from(this.agents.values());
+    const completedAgents = agents.filter(a => a.status === AgentStatus.COMPLETED);
+    const executionTimes = completedAgents.map(a => a.executionTime).filter(Boolean);
+    
+    const avgExecutionTime = executionTimes.length > 0 
+      ? executionTimes.reduce((sum, time) => sum + time, 0) / executionTimes.length 
+      : 0;
+    
+    return {
+      averageExecutionTime: Number(avgExecutionTime.toFixed(2)),
+      completedTasks: completedAgents.length,
+      totalAgents: agents.length,
+      timestamp: Date.now()
+    };
+  }
+
+  // 监控Agent状态
+  monitorAgentStatus() {
+    const agents = Array.from(this.agents.values());
+    const statusReport = {
+      timestamp: Date.now(),
+      agents: agents.map(agent => ({
+        id: agent.id,
+        type: agent.type,
+        status: agent.status,
+        lastSuccessTime: agent.lastSuccessTime,
+        lastFailureTime: agent.lastFailureTime,
+        executionTime: agent.executionTime
+      }))
+    };
+    
+    console.log('Agent Status Monitor:', statusReport);
+    return statusReport;
+  }
+
+  // 故障恢复
+  async recoverFromFailure(agentId, error) {
+    const agent = this.agents.get(agentId);
+    if (!agent) {
+      return { success: false, message: 'Agent not found' };
+    }
+    
+    console.log(`Attempting to recover agent ${agentId} from error: ${error.message}`);
+    
+    try {
+      agent.reset();
+      return { success: true, message: 'Agent reset successfully' };
+    } catch (recoveryError) {
+      return { success: false, message: `Recovery failed: ${recoveryError.message}` };
+    }
   }
 
   // 动态注册工作流
