@@ -4,19 +4,18 @@ const { createEvidenceUnit } = require("./evidence-model");
 const { extractTextFromResponsePayload } = require("./openai-response");
 const { resolveDataFile } = require("./data-paths");
 const {
-  synthesizeTool,
-  runEphemeralTool,
-  readToolMemory,
-  recordToolExperience
-} = require("./ephemeral-tooling");
-const {
   createAgentRuntime,
   dispatchAgentTask,
   completeAgentTask,
   failAgentTask,
   getAgentRuntimeSnapshot,
   createAgentRegistry,
-  runtimeCapabilities
+  runtimeCapabilities,
+  synthesizeTool,
+  runEphemeralTool,
+  readToolMemory,
+  readAuditLog,
+  recordToolOutcome
 } = require("./runtime");
 const {
   AgentSystem,
@@ -107,6 +106,10 @@ function getExperienceMemory() {
 
 function getToolMemory() {
   return readToolMemory();
+}
+
+function getToolAuditLog(limit = 20) {
+  return readAuditLog(limit);
 }
 
 function getSourceCapabilities() {
@@ -817,10 +820,14 @@ function synthesize(question, mode, candidates, reads, evidenceItems, verificati
       dynamic_tools: telemetry.ephemeral_tools.map((item) => ({
         tool_id: item.tool.tool_id,
         strategy: item.tool.strategy,
+        runtime: item.tool.runtime,
         target: item.target,
         success: item.success,
         logs: item.logs,
-        worth_promoting: item.worth_promoting
+        worth_promoting: item.worth_promoting,
+        validation: item.validation || null,
+        promotion: item.promotion || null,
+        audit: item.audit || []
       })),
       task_observability: {
         stop_reason: telemetry.stop_reason,
@@ -1199,7 +1206,9 @@ async function runResearch({ question, mode, onProgress }) {
       ephemeral_tools: round.tool_attempts.map((item) => ({
         strategy: item.tool.strategy,
         success: item.success,
-        target: item.target?.url || item.target?.title || "unknown target"
+        target: item.target?.url || item.target?.title || "unknown target",
+        validation: item.validation || null,
+        promotion: item.promotion || null
       }))
     };
     scratchpad.agent_reports.push(roundAgentReport);
@@ -1239,7 +1248,10 @@ async function runResearch({ question, mode, onProgress }) {
       tool_attempts: round.tool_attempts.map((item) => ({
         strategy: item.tool.strategy,
         success: item.success,
-        target: item.target?.url || item.target?.title || "unknown target"
+        target: item.target?.url || item.target?.title || "unknown target",
+        validation: item.validation || null,
+        promotion: item.promotion || null,
+        audit: item.audit || []
       })),
       agent_reports: roundAgentReport
     };
@@ -1322,7 +1334,7 @@ async function runResearch({ question, mode, onProgress }) {
   });
   const knowledgeGraphExport = knowledgeGraph.export();
   const experience = summarizeExperience(question, scratchpad, plan, evaluation, telemetry);
-  const toolMemory = recordToolExperience(telemetry.ephemeral_tools);
+  const toolMemory = recordToolOutcome(telemetry.ephemeral_tools);
   const memory = readExperienceMemory();
   writeExperienceMemory([experience, ...memory].slice(0, 30));
   writeKnowledgeGraph(knowledgeGraph);
@@ -1340,7 +1352,8 @@ async function runResearch({ question, mode, onProgress }) {
     scratchpad,
     knowledge_graph: knowledgeGraphExport,
     runtime: {
-      capabilities: runtimeCapabilities
+      capabilities: runtimeCapabilities,
+      tool_audit_recent: getToolAuditLog(20)
     },
     agent_runtime: getAgentRuntimeSnapshot(agentRuntime),
     telemetry,
@@ -1355,6 +1368,7 @@ module.exports = {
   getSamples,
   getExperienceMemory,
   getToolMemory,
+  getToolAuditLog,
   getSourceCapabilities,
   synthesizeTool,
   runEphemeralTool,

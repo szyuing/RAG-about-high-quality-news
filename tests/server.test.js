@@ -40,6 +40,7 @@ async function withServer(fn) {
     getSamples: () => [],
     getExperienceMemory: () => [],
     getToolMemory: () => ({}),
+    getToolAuditLog: () => [{ type: "tool_execution", tool_id: "tool-1" }],
     getSourceCapabilities: () => [],
     synthesizeTool: async () => ({ id: "tool-1" }),
     runEphemeralTool: async () => ({ success: true })
@@ -106,5 +107,29 @@ test("POST /api/tools/synthesize should reject invalid payloads with 400", async
     assert.equal(response.statusCode, 400);
     assert.equal(response.json.error, "invalid_request");
     assert.match(response.json.message, /goal is required/);
+  });
+});
+
+test("GET /api/tools/audit should return recent tool audit entries", async () => {
+  await withServer(async (server) => {
+    const response = await request(server, {
+      path: "/api/tools/audit?limit=5",
+      method: "GET"
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json.entries, [{ type: "tool_execution", tool_id: "tool-1" }]);
+  });
+});
+
+test("GET /api/samples should include tool audit entries", async () => {
+  await withServer(async (server) => {
+    const response = await request(server, {
+      path: "/api/samples",
+      method: "GET"
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json.tool_audit_recent, [{ type: "tool_execution", tool_id: "tool-1" }]);
   });
 });

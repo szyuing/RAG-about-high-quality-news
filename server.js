@@ -178,6 +178,7 @@ function createServer(deps = {}) {
     getSamples = researchEngine.getSamples,
     getExperienceMemory = researchEngine.getExperienceMemory,
     getToolMemory = researchEngine.getToolMemory,
+    getToolAuditLog = researchEngine.getToolAuditLog,
     getSourceCapabilities = researchEngine.getSourceCapabilities,
     synthesizeTool = researchEngine.synthesizeTool,
     runEphemeralTool = researchEngine.runEphemeralTool
@@ -196,7 +197,16 @@ function createServer(deps = {}) {
         prompts: getSamples(),
         experience_memory: getExperienceMemory(),
         tool_memory: getToolMemory(),
+        tool_audit_recent: getToolAuditLog(20),
         source_capabilities: getSourceCapabilities()
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/tools/audit") {
+      const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || 50)));
+      sendJson(res, 200, {
+        entries: getToolAuditLog(limit)
       });
       return;
     }

@@ -96,6 +96,11 @@ function scoreToolForTask(tool, task = {}) {
   const documentKind = String(task.candidate?.metadata?.mime_type || task.candidate?.url || "").toLowerCase();
   const hints = getToolCapabilityHints(tool.id);
   let score = 0;
+  if (tool.lifecycle_state === "registered" || tool.status === "active") {
+    score += 3;
+  } else if (tool.lifecycle_state === "candidate" || tool.status === "candidate") {
+    score += 1;
+  }
 
   if (preferredToolId && tool.id === preferredToolId) {
     score += 10;
@@ -178,7 +183,16 @@ const ToolRegistry = {
       replaced_by: null,
       supersedes: toolDefinition.supersedes || existingActive?.id || null,
       request_id: toolDefinition.request_id || null,
-      registered_at: registeredAt
+      registered_at: registeredAt,
+      runtime: toolDefinition.runtime || "node",
+      site_scope: toolDefinition.site_scope || null,
+      safety_level: toolDefinition.safety_level || "restricted",
+      implementation_plan: toolDefinition.implementation_plan || null,
+      lifecycle_state: toolDefinition.lifecycle_state || (toolDefinition.status === "candidate" ? "candidate" : (toolDefinition.status === "ephemeral" ? "ephemeral" : "registered")),
+      verifier_verdict: toolDefinition.verifier_verdict || null,
+      last_verified_at: toolDefinition.last_verified_at || null,
+      code_hash: toolDefinition.code_hash || null,
+      spec_hash: toolDefinition.spec_hash || null
     };
 
     if (existingActive && existingActive.id !== normalized.id) {
@@ -400,13 +414,15 @@ const ToolRegistry = {
       base_tool_id: tool.base_tool_id,
       version: tool.version,
       status: tool.status,
+      lifecycle_state: tool.lifecycle_state || null,
       source: tool.source,
       promoted_to_builtin: tool.promoted_to_builtin,
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters,
       hasInputSchema: !!tool.inputSchema,
-      hasOutputSchema: !!tool.outputSchema
+      hasOutputSchema: !!tool.outputSchema,
+      verifier_verdict: tool.verifier_verdict || null
     }));
   },
   

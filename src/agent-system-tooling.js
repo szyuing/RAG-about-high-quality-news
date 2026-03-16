@@ -1,6 +1,7 @@
 const { ToolRegistry } = require("./source-connectors");
 const { agentCommunication } = require("./agent-communication");
 const { AgentType, ToolCreatorPool } = require("./agents");
+const { requestToolCreation: requestToolCreationFromRuntime } = require("./runtime");
 
 function applyAgentSystemTooling(AgentSystem) {
   Object.assign(AgentSystem.prototype, {
@@ -57,13 +58,26 @@ function applyAgentSystemTooling(AgentSystem) {
     },
 
     async requestToolCreation(requester, toolSpecs, metadata = {}) {
+      if (requester !== AgentType.LLM_ORCHESTRATOR) {
+        throw new Error("Only LLM-Orchestrator can formally request tool creation");
+      }
+
       const { response } = await agentCommunication.requestToolCreation(
         requester,
         AgentType.TOOL_CREATOR,
         toolSpecs,
         metadata
       );
-      return response.content;
+      return requestToolCreationFromRuntime({
+        requester,
+        metadata: {
+          ...metadata,
+          request_id: response.content?.request_id || response.metadata?.correlation_id || null
+        },
+        tool_specs: response.content?.tools || toolSpecs
+      }, {
+        creator: this.getAgent(AgentType.TOOL_CREATOR)
+      });
     },
 
     respondToolCreation(sender, receiver, requestId, payload, metadata = {}) {

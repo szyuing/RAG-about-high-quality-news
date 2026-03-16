@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const { invokeSourceTool, ToolRegistry } = require("./source-connectors");
 const { verifyEvidenceUnits } = require("./fact-verifier");
 const { agentCommunication } = require("./agent-communication");
+const { normalizeToolSpec, normalizeToolCreationRequest } = require("./tool-platform");
 
 const AgentStatus = {
   IDLE: "idle",
@@ -938,8 +939,18 @@ class ToolCreatorAgent extends BaseAgent {
     this.startTime = Date.now();
 
     try {
-      const toolSpecs = input?.toolSpecs || input?.tools || [];
-      const requestMetadata = input?.requestMetadata || {};
+      const normalizedRequest = normalizeToolCreationRequest(
+        input?.toolCreationRequest || {
+          requester: input?.requestMetadata?.requester || null,
+          metadata: input?.requestMetadata || {},
+          tool_specs: input?.toolSpecs || input?.tools || []
+        }
+      );
+      const toolSpecs = normalizedRequest.tool_specs || [];
+      const requestMetadata = {
+        ...(normalizedRequest.metadata || {}),
+        requester: normalizedRequest.requester || null
+      };
       const createdTools = [];
 
       for (const spec of toolSpecs) {
@@ -981,47 +992,46 @@ class ToolCreatorAgent extends BaseAgent {
     const timestamp = Date.now();
     const random = crypto.randomBytes(8).toString("hex");
     const agentId = this.id;
-    const toolId = spec.id || `tool_${agentId}_${timestamp}_${random}`;
+    const toolId = spec.id || spec.tool_id || `tool_${agentId}_${timestamp}_${random}`;
     const implementation = spec.implementation || this.generateToolImplementation(spec);
-
-    const toolDefinition = {
+    return normalizeToolSpec({
+      ...spec,
       id: toolId,
+      tool_id: toolId,
       base_tool_id: spec.base_tool_id || spec.id || toolId,
       name: spec.name || `Tool ${toolId}`,
       description: spec.description || "Generated tool",
       parameters: spec.parameters || [],
-      execute: implementation,
-      source: spec.source || "dynamic"
-    };
-
-    if (typeof ToolRegistry.registerTool === "function") {
-      ToolRegistry.registerTool(toolDefinition);
-    }
-
-    return {
-      ...toolDefinition,
-      status: "created",
-      version: spec.version || "1.0.0",
+      implementation,
+      source: spec.source || "dynamic",
+      runtime: spec.runtime || null,
+      lifecycle_state: "ephemeral",
+      synthesis_mode: "creator_agent",
       created_by: agentId,
       created_for: requestMetadata.requester || spec.created_for || null,
-      request_id: requestMetadata.request_id || null,
-      created_at: new Date().toISOString()
-    };
+      request_id: requestMetadata.request_id || null
+    }, {
+      ...requestMetadata,
+      requester: requestMetadata.requester || spec.created_for || null
+    });
   }
 
   normalizeToolCreationRequest(message) {
-    const content = message?.content || {};
-    const toolSpecs = Array.isArray(content.tool_specs)
-      ? content.tool_specs
-      : Array.isArray(content.toolSpecs)
-        ? content.toolSpecs
-        : [];
-    return {
-      toolSpecs,
-      requestMetadata: {
+    const normalized = normalizeToolCreationRequest({
+      requester: message?.sender || null,
+      metadata: {
         request_id: message?.metadata?.request_id || null,
-        requester: message?.sender || content.requester || null,
-        purpose: content.purpose || null
+        purpose: message?.content?.purpose || null
+      },
+      tool_specs: message?.content?.tool_specs || message?.content?.toolSpecs || []
+    });
+    return {
+      toolCreationRequest: normalized,
+      toolSpecs: normalized.tool_specs,
+      requestMetadata: {
+        request_id: normalized.metadata?.request_id || null,
+        requester: normalized.requester || null,
+        purpose: normalized.metadata?.purpose || null
       }
     };
   }
@@ -1039,7 +1049,8 @@ class ToolCreatorAgent extends BaseAgent {
           success: result.status === AgentStatus.COMPLETED,
           tools: result.result?.tools || [],
           count: result.result?.count || 0,
-          markdown_report: result.result?.markdown_report || ""
+          markdown_report: result.result?.markdown_report || "",
+          request_id: message.metadata?.request_id || null
         },
         {
           handled_by: this.id

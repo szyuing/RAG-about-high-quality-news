@@ -8,7 +8,7 @@ test("AgentSystem should route tool creation requests through Tool Creator Agent
   agentSystem.clearMessageHistory();
 
   const toolId = `protocol_tool_${Date.now()}`;
-  const response = await agentSystem.requestToolCreation(AgentType.WEB_RESEARCHER, [
+  const response = await agentSystem.requestToolCreation(AgentType.LLM_ORCHESTRATOR, [
     {
       id: toolId,
       name: "Protocol Tool",
@@ -30,11 +30,13 @@ test("AgentSystem should route tool creation requests through Tool Creator Agent
   assert.equal(response.request_type, "tool_creation_result");
   assert.equal(response.success, true);
   assert.equal(response.count, 1);
-  assert.equal(response.tools[0].id, toolId);
-  assert.equal(response.tools[0].created_for, AgentType.WEB_RESEARCHER);
+  assert.equal(response.tools[0].tool_id || response.tools[0].id, toolId);
+  assert.equal(response.tools[0].created_for, AgentType.LLM_ORCHESTRATOR);
+  assert.equal(response.tools[0].lifecycle_state, "ephemeral");
 
   const registered = ToolRegistry.getTool(toolId);
   assert.equal(registered.id, toolId);
+  assert.equal(registered.lifecycle_state, "ephemeral");
 
   const history = agentSystem.getMessageHistory();
   assert.equal(history.length, 2);
@@ -42,12 +44,23 @@ test("AgentSystem should route tool creation requests through Tool Creator Agent
   assert.equal(history[1].content.request_type, "tool_creation_result");
 });
 
+test("AgentSystem should reject formal tool creation requests from specialist agents", async () => {
+  const agentSystem = new AgentSystem();
+
+  await assert.rejects(() => agentSystem.requestToolCreation(AgentType.WEB_RESEARCHER, [
+    {
+      id: `forbidden_tool_${Date.now()}`,
+      name: "Forbidden Tool"
+    }
+  ]), /LLM-Orchestrator/);
+});
+
 test("AgentSystem should expose a standard request-response protocol for tool creation", async () => {
   const agentSystem = new AgentSystem();
   agentSystem.clearMessageHistory();
 
   const toolId = `protocol_calc_${Date.now()}`;
-  const response = await agentSystem.requestToolCreation(AgentType.LONG_TEXT_COLLECTOR, [
+  const response = await agentSystem.requestToolCreation(AgentType.LLM_ORCHESTRATOR, [
     {
       id: toolId,
       name: "Protocol Calculator",
@@ -79,7 +92,7 @@ test("Tool lifecycle management should track versions, promotion, deprecation, a
   const agentSystem = new AgentSystem();
   const baseToolId = `lifecycle_tool_${Date.now()}`;
 
-  const first = await agentSystem.requestToolCreation(AgentType.WEB_RESEARCHER, [
+  const first = await agentSystem.requestToolCreation(AgentType.LLM_ORCHESTRATOR, [
     {
       id: `${baseToolId}_v1`,
       base_tool_id: baseToolId,
@@ -91,7 +104,7 @@ test("Tool lifecycle management should track versions, promotion, deprecation, a
     }
   ], { timeout_ms: 3000 });
 
-  const second = await agentSystem.requestToolCreation(AgentType.WEB_RESEARCHER, [
+  const second = await agentSystem.requestToolCreation(AgentType.LLM_ORCHESTRATOR, [
     {
       id: `${baseToolId}_v2`,
       base_tool_id: baseToolId,
@@ -106,6 +119,7 @@ test("Tool lifecycle management should track versions, promotion, deprecation, a
   const history = agentSystem.getToolHistory(baseToolId);
   assert.equal(history.length, 2);
   assert.equal(ToolRegistry.getTool(baseToolId).id, `${baseToolId}_v2`);
+  assert.equal(ToolRegistry.getTool(baseToolId).lifecycle_state, "ephemeral");
 
   const promoted = agentSystem.promoteTool(baseToolId, "high success rate");
   assert.equal(promoted.promoted_to_builtin, true);

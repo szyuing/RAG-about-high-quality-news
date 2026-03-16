@@ -4,8 +4,12 @@ const { synthesizeTool, runEphemeralTool } = require("./ephemeral-tooling");
 const {
   dispatchAgentTask,
   completeAgentTask,
-  failAgentTask
+  failAgentTask,
+  validateToolResult,
+  recordToolOutcome,
+  promoteToolCandidate
 } = require("./runtime");
+const { AgentType } = require("./agents");
 
 function dedupeBy(items, getKey) {
   const map = new Map();
@@ -105,9 +109,10 @@ async function attemptToolCreationRecovery(agent, candidate, error, telemetry, r
     }
   };
 
-  const response = await agentSystem.requestToolCreation(agent, [toolSpec], {
+  const response = await agentSystem.requestToolCreation(AgentType.LLM_ORCHESTRATOR, [toolSpec], {
     purpose: `Recover failed source read for ${candidate.url}`,
-    timeout_ms: 15000
+    timeout_ms: 15000,
+    originating_agent: agent
   });
 
   const createdTool = response?.tools?.[0];
@@ -129,18 +134,51 @@ async function attemptToolCreationRecovery(agent, candidate, error, telemetry, r
     throw new Error(recoveryExecution.error?.message || "tool-created recovery failed");
   }
 
+  const validation = validateToolResult({
+    tool: createdTool,
+    result: {
+      success: recoveryExecution.success,
+      output: recoveryExecution.data,
+      extracted_data: recoveryExecution.data,
+      error: recoveryExecution.error?.message || null
+    },
+    validationContext: {
+      expect_read: true,
+      expected_source_id: candidate.id
+    }
+  });
+  const memory = recordToolOutcome({
+    tool: createdTool,
+    result: {
+      success: recoveryExecution.success,
+      output: recoveryExecution.data,
+      extracted_data: recoveryExecution.data,
+      error: recoveryExecution.error?.message || null
+    },
+    validation
+  });
+  const promotion = promoteToolCandidate({
+    tool: createdTool,
+    validation,
+    memory
+  });
+
   if (runtimeTask) {
     completeAgentTask(runtime, runtimeTask.id, {
       source_id: candidate.id,
       tool: createdTool.id,
-      recovered_via: "tool_creation_request"
+      recovered_via: "tool_creation_request",
+      validation: validation.verdict,
+      lifecycle_state: promotion.lifecycle_state
     });
   }
 
   return {
     candidate,
     read: recoveryExecution.data,
-    recovered_by: createdTool.id
+    recovered_by: createdTool.id,
+    validation,
+    promotion
   };
 }
 

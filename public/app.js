@@ -5,7 +5,8 @@ const state = {
   liveRounds: [],
   streamCompleted: false,
   toolAttempts: [],
-  toolMemory: null
+  toolMemory: null,
+  toolAudit: []
 };
 
 const sourceTypeLabels = {
@@ -176,7 +177,7 @@ function renderFinalAnswer(result) {
         <h4>Dynamic Tools</h4>
         <ul class="tight-list">
           ${(dynamicTools.length ? dynamicTools : [{ strategy: "none", success: true, target: { url: "" }, worth_promoting: { reason: "No ephemeral tool was needed." } }])
-            .map((item) => `<li>${escapeHtml(item.strategy || "tool")} | ${escapeHtml(item.success ? "success" : "failed")} | ${escapeHtml(item.target?.url || item.target?.title || "")} | ${escapeHtml(item.worth_promoting?.reason || "")}</li>`)
+            .map((item) => `<li>${escapeHtml(item.strategy || "tool")} | ${escapeHtml(item.runtime || "node")} | ${escapeHtml(item.success ? "success" : "failed")} | ${escapeHtml(item.validation?.verdict || item.promotion?.lifecycle_state || "unverified")} | ${escapeHtml(item.promotion?.rollback ? `rollback to ${item.promotion.rollback.active}` : "no rollback")} | ${escapeHtml(item.target?.url || item.target?.title || "")} | ${escapeHtml(item.audit?.[item.audit.length - 1]?.type || item.worth_promoting?.reason || "")}</li>`)
             .join("")}
         </ul>
       </section>
@@ -227,7 +228,7 @@ function renderRounds(rounds) {
         <p><strong>Sources:</strong> ${(round.selected_sources || []).map((item) => `${escapeHtml(item.title)} (${escapeHtml(displayConnector(item.connector))} / ${escapeHtml(displaySourceType(item.content_type || item.source_type))})`).join(" | ") || "none"}</p>
         <p><strong>Collector layer:</strong> video ${escapeHtml(String(round.agent_reports?.collector_layer?.video_parser || 0))} | long text ${escapeHtml(String(round.agent_reports?.collector_layer?.long_text_collector || 0))} | chart ${escapeHtml(String(round.agent_reports?.collector_layer?.chart_parser || 0))} | table ${escapeHtml(String(round.agent_reports?.collector_layer?.table_parser || 0))}</p>
         <p><strong>Routed tasks:</strong> ${(round.routed_tasks || []).map((item) => `${escapeHtml(displayAgent(item.agent))} -> ${escapeHtml(displayTool(item.tool))}`).join(" | ") || "none"}</p>
-        <p><strong>Dynamic tools:</strong> ${(round.tool_attempts || []).map((item) => `${escapeHtml(item.strategy)} (${escapeHtml(item.success ? "success" : "failed")})`).join(" | ") || "none"}</p>
+        <p><strong>Dynamic tools:</strong> ${(round.tool_attempts || []).map((item) => `${escapeHtml(item.strategy)} (${escapeHtml(item.success ? "success" : "failed")} / ${escapeHtml(item.validation?.verdict || item.promotion?.lifecycle_state || "unverified")} / ${escapeHtml(item.promotion?.rollback ? `rollback ${item.promotion.rollback.active}` : "stable")})`).join(" | ") || "none"}</p>
         <p><strong>Next step:</strong> ${escapeHtml(round.evaluation_snapshot?.next_best_action || "n/a")}</p>
       </div>
     </article>
@@ -466,7 +467,9 @@ function renderToolProgress(payload) {
     [
       `target: ${payload.tool_attempt?.target?.url || payload.tool_attempt?.target?.title || "unknown"}`,
       `status: ${payload.tool_attempt?.success ? "success" : "failed"}`,
-      `promote: ${payload.tool_attempt?.worth_promoting?.should_promote ? "yes" : "no"}`
+      `promote: ${payload.tool_attempt?.worth_promoting?.should_promote ? "yes" : "no"}`,
+      `validation: ${payload.tool_attempt?.validation?.verdict || "pending"}`,
+      `rollback: ${payload.tool_attempt?.promotion?.rollback ? payload.tool_attempt.promotion.rollback.active : "none"}`
     ]
   );
 }
@@ -479,6 +482,7 @@ async function fetchSamples() {
   state.connectorLabels = Object.fromEntries((data.source_capabilities || []).map((item) => [item.id, item.label || item.id]));
   state.memory = data.experience_memory || [];
   state.toolMemory = data.tool_memory || null;
+  state.toolAudit = data.tool_audit_recent || [];
   renderMemory(state.memory);
 }
 
@@ -569,6 +573,7 @@ async function runResearch() {
       renderKnowledgeGraph(result.knowledge_graph || null);
       state.memory = [result.experience, ...state.memory].slice(0, 8);
       state.toolMemory = result.tool_memory || state.toolMemory;
+      state.toolAudit = result.runtime?.tool_audit_recent || state.toolAudit;
       renderMemory(state.memory);
       setRunButtonIdle();
     });

@@ -596,6 +596,7 @@ test("runSpecialistReads should request a recovery tool after read failure and r
       agent_system: {
         async requestToolCreation(requester, toolSpecs) {
           requestCount += 1;
+          assert.equal(requester, "llm_orchestrator");
           const tool = {
             id: "recovery_tool",
             name: toolSpecs[0].name,
