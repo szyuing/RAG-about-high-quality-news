@@ -5,8 +5,10 @@ const {
   AgentStatus,
   SupervisorAgent,
   WebResearcherAgent,
-  DeepAnalystAgent,
-  MultimediaAgent,
+  LongTextCollectorAgent,
+  VideoParserAgent,
+  ChartParserAgent,
+  TableParserAgent,
   FactVerifierAgent,
   SynthesizerAgent
 } = require('./src/agent-orchestrator');
@@ -18,8 +20,10 @@ async function testAgentSystem() {
   console.log('1. Agent 类型枚举:');
   console.log('  SUPERVISOR:', AgentType.SUPERVISOR);
   console.log('  WEB_RESEARCHER:', AgentType.WEB_RESEARCHER);
-  console.log('  DEEP_ANALYST:', AgentType.DEEP_ANALYST);
-  console.log('  MULTIMEDIA:', AgentType.MULTIMEDIA);
+  console.log('  LONG_TEXT_COLLECTOR:', AgentType.LONG_TEXT_COLLECTOR);
+  console.log('  VIDEO_PARSER:', AgentType.VIDEO_PARSER);
+  console.log('  CHART_PARSER:', AgentType.CHART_PARSER);
+  console.log('  TABLE_PARSER:', AgentType.TABLE_PARSER);
   console.log('  FACT_VERIFIER:', AgentType.FACT_VERIFIER);
   console.log('  SYNTHESIZER:', AgentType.SYNTHESIZER);
   console.log('');
@@ -76,13 +80,21 @@ async function testAgentSystem() {
   const web = new WebResearcherAgent({ id: 'test-web', name: 'Test Web Researcher' });
   console.log('  Web Researcher Agent:', web.id, web.name, web.type);
   
-  // Deep Analyst Agent
-  const deep = new DeepAnalystAgent({ id: 'test-deep', name: 'Test Deep Analyst' });
-  console.log('  Deep Analyst Agent:', deep.id, deep.name, deep.type);
-  
-  // Multimedia Agent
-  const multimedia = new MultimediaAgent({ id: 'test-multimedia', name: 'Test Multimedia' });
-  console.log('  Multimedia Agent:', multimedia.id, multimedia.name, multimedia.type);
+  // Long Text Collector Agent
+  const longText = new LongTextCollectorAgent({ id: 'test-long-text', name: 'Test Long Text Collector' });
+  console.log('  Long Text Collector Agent:', longText.id, longText.name, longText.type);
+
+  // Video Parser Agent
+  const video = new VideoParserAgent({ id: 'test-video', name: 'Test Video Parser' });
+  console.log('  Video Parser Agent:', video.id, video.name, video.type);
+
+  // Chart Parser Agent
+  const chart = new ChartParserAgent({ id: 'test-chart', name: 'Test Chart Parser' });
+  console.log('  Chart Parser Agent:', chart.id, chart.name, chart.type);
+
+  // Table Parser Agent
+  const table = new TableParserAgent({ id: 'test-table', name: 'Test Table Parser' });
+  console.log('  Table Parser Agent:', table.id, table.name, table.type);
   
   // Fact Verifier Agent
   const verifier = new FactVerifierAgent({ id: 'test-verifier', name: 'Test Fact Verifier' });

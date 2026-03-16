@@ -16,10 +16,10 @@ async function testDynamicAgentOrchestration() {
   });
   console.log('  创建新的Web Researcher Agent:', newWebResearcher.id);
   
-  const newDeepAnalyst = agentSystem.createAgent(AgentType.DEEP_ANALYST, {
-    name: 'Dynamic Deep Analyst'
+  const newLongTextCollector = agentSystem.createAgent(AgentType.LONG_TEXT_COLLECTOR, {
+    name: 'Dynamic Long Text Collector'
   });
-  console.log('  创建新的Deep Analyst Agent:', newDeepAnalyst.id);
+  console.log('  创建新的Long Text Collector Agent:', newLongTextCollector.id);
   
   // 查看当前Agent状态
   const agentStatus = agentSystem.getAgentStatus();
@@ -59,16 +59,16 @@ async function testDynamicAgentOrchestration() {
   }
   
   // 分配多媒体任务
-  const multimediaTask = agentSystem.assignTask(
-    'multimedia',
-    'Analyze images related to Sora model',
+  const videoTask = agentSystem.assignTask(
+    'video_parse',
+    'Analyze video related to Sora model',
     'medium',
-    { imageCount: 5 }
+    { videoCount: 5 }
   );
-  console.log('  分配多媒体任务:', multimediaTask.success ? '成功' : '失败');
-  if (multimediaTask.success) {
-    console.log(`    任务ID: ${multimediaTask.task.id}`);
-    console.log(`    分配给: ${multimediaTask.agentId} (${multimediaTask.agentType})`);
+  console.log('  分配视频解析任务:', videoTask.success ? '成功' : '失败');
+  if (videoTask.success) {
+    console.log(`    任务ID: ${videoTask.task.id}`);
+    console.log(`    分配给: ${videoTask.agentId} (${videoTask.agentType})`);
   }
   console.log('');
   
@@ -131,9 +131,9 @@ async function testDynamicAgentOrchestration() {
     console.log(`  销毁Web Researcher Agent (${newWebResearcher.id}):`, destroyResult ? '成功' : '失败');
   }
   
-  if (newDeepAnalyst) {
-    const destroyResult = agentSystem.destroyAgent(newDeepAnalyst.id);
-    console.log(`  销毁Deep Analyst Agent (${newDeepAnalyst.id}):`, destroyResult ? '成功' : '失败');
+  if (newLongTextCollector) {
+    const destroyResult = agentSystem.destroyAgent(newLongTextCollector.id);
+    console.log(`  销毁Long Text Collector Agent (${newLongTextCollector.id}):`, destroyResult ? '成功' : '失败');
   }
   
   console.log('  销毁后Agent数量:', agentSystem.getAgentStatus().length);
@@ -153,7 +153,7 @@ async function testDynamicAgentOrchestration() {
   
   // 分配一个需要特殊Agent的任务
   const specialTask = agentSystem.assignTask(
-    'multimedia',
+    'video_parse',
     'Analyze video content related to Sora model',
     'high',
     { videoCount: 3 }

@@ -14,20 +14,20 @@ test("agent runtime should track task lifecycle, inbox, and outbox", () => {
   const runtime = createAgentRuntime(createAgentRegistry());
   const task = dispatchAgentTask(runtime, {
     from: "supervisor",
-    agentId: "deep_analyst",
-    taskType: "read_source",
+    agentId: "long_text_collector",
+    taskType: "collect_long_text",
     input: { source_id: "source-1" },
     metadata: { connector: "bing_web" }
   });
 
-  assert.equal(runtime.agents.deep_analyst.status, "running");
-  assert.equal(runtime.agents.deep_analyst.inbox.length, 1);
+  assert.equal(runtime.agents.long_text_collector.status, "running");
+  assert.equal(runtime.agents.long_text_collector.inbox.length, 1);
   assert.equal(runtime.agents.supervisor.outbox.length, 1);
 
   completeAgentTask(runtime, task.id, { source_id: "source-1" });
 
-  assert.equal(runtime.agents.deep_analyst.status, "completed");
-  assert.equal(runtime.agents.deep_analyst.completed_tasks, 1);
+  assert.equal(runtime.agents.long_text_collector.status, "completed");
+  assert.equal(runtime.agents.long_text_collector.completed_tasks, 1);
   assert.equal(runtime.tasks[0].status, "completed");
   assert.equal(runtime.messages.length, 2);
 });

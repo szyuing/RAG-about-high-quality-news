@@ -20,23 +20,23 @@ async function testKnowledgeSharing() {
   );
   console.log('  Web Researcher共享知识ID:', knowledgeId1);
   
-  // Deep Analyst共享知识
+  // Long Text Collector共享知识
   const knowledgeId2 = agentSystem.shareKnowledge(
-    AgentType.DEEP_ANALYST,
+    AgentType.LONG_TEXT_COLLECTOR,
     'Sora can generate videos up to 60 seconds in length',
     ['Sora', 'video generation', 'capabilities'],
     0.85
   );
-  console.log('  Deep Analyst共享知识ID:', knowledgeId2);
+  console.log('  Long Text Collector共享知识ID:', knowledgeId2);
   
-  // Multimedia Agent共享知识
+  // Video Parser Agent共享知识
   const knowledgeId3 = agentSystem.shareKnowledge(
-    AgentType.MULTIMEDIA,
+    AgentType.VIDEO_PARSER,
     'Sora uses diffusion models for video generation',
     ['Sora', 'diffusion models', 'video generation'],
     0.8
   );
-  console.log('  Multimedia Agent共享知识ID:', knowledgeId3);
+  console.log('  Video Parser Agent共享知识ID:', knowledgeId3);
   console.log('');
   
   // 2. 测试知识搜索
@@ -132,14 +132,14 @@ async function testKnowledgeSharing() {
   );
   console.log('  Web Researcher发现新信息:', newKnowledgeId);
   
-  // Deep Analyst分析信息
+  // Long Text Collector分析信息
   const analysisKnowledgeId = agentSystem.shareKnowledge(
-    AgentType.DEEP_ANALYST,
+    AgentType.LONG_TEXT_COLLECTOR,
     'Sora\'s release marked a significant advancement in video generation AI',
     ['Sora', 'analysis', 'impact'],
     0.8
   );
-  console.log('  Deep Analyst分析信息:', analysisKnowledgeId);
+  console.log('  Long Text Collector分析信息:', analysisKnowledgeId);
   
   // Synthesizer综合信息
   const synthesisKnowledgeId = agentSystem.shareKnowledge(

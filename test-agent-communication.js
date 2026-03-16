@@ -32,7 +32,7 @@ async function testAgentCommunication() {
   // 发送通知消息
   const notificationMessage = agentSystem.sendNotification(
     AgentType.SUPERVISOR,
-    AgentType.DEEP_ANALYST,
+    AgentType.LONG_TEXT_COLLECTOR,
     'Please analyze the search results',
     { taskId: 'task_123' }
   );
@@ -102,23 +102,23 @@ async function testAgentCommunication() {
   );
   console.log('  Web Researcher -> Supervisor:', completionMessage.content);
   
-  // Supervisor通知Deep Analyst分析结果
+  // Supervisor通知Long Text Collector分析结果
   const analysisMessage = agentSystem.sendNotification(
     AgentType.SUPERVISOR,
-    AgentType.DEEP_ANALYST,
+    AgentType.LONG_TEXT_COLLECTOR,
     'Analyze the research results',
     { taskId: taskMessage.id }
   );
-  console.log('  Supervisor -> Deep Analyst:', analysisMessage.content);
+  console.log('  Supervisor -> Long Text Collector:', analysisMessage.content);
   
-  // Deep Analyst完成分析并响应
+  // Long Text Collector完成分析并响应
   const analysisResponse = agentSystem.sendResponse(
-    AgentType.DEEP_ANALYST,
+    AgentType.LONG_TEXT_COLLECTOR,
     AgentType.SUPERVISOR,
     'Analysis completed, found key insights',
     { insights: 5, confidence: 0.85 }
   );
-  console.log('  Deep Analyst -> Supervisor:', analysisResponse.content);
+  console.log('  Long Text Collector -> Supervisor:', analysisResponse.content);
   
   // Supervisor通知Synthesizer生成最终报告
   const synthesisMessage = agentSystem.sendNotification(

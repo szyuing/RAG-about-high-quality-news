@@ -1,36 +1,37 @@
 class Message {
   constructor(sender, receiver, type, content, metadata = {}) {
-    this.id = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    this.id = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     this.sender = sender;
     this.receiver = receiver;
-    this.type = type; // request, response, notification, error
+    this.type = type;
     this.content = content;
     this.metadata = metadata;
     this.timestamp = Date.now();
-    this.status = 'sent'; // sent, delivered, processed, failed
+    this.status = "sent";
   }
 
   markDelivered() {
-    this.status = 'delivered';
+    this.status = "delivered";
     this.deliveredAt = Date.now();
   }
 
   markProcessed() {
-    this.status = 'processed';
+    this.status = "processed";
     this.processedAt = Date.now();
   }
 
   markFailed(error) {
-    this.status = 'failed';
+    this.status = "failed";
     this.failedAt = Date.now();
     this.error = error;
   }
 }
 
 class MessageQueue {
-  constructor() {
+  constructor(processor = null) {
     this.queue = [];
     this.processing = false;
+    this.processor = processor;
   }
 
   enqueue(message) {
@@ -51,7 +52,9 @@ class MessageQueue {
 
     try {
       message.markDelivered();
-      // 这里可以添加消息处理逻辑
+      if (typeof this.processor === "function") {
+        await this.processor(message);
+      }
       message.markProcessed();
     } catch (error) {
       message.markFailed(error.message);
@@ -71,12 +74,12 @@ class MessageQueue {
 
 class AgentCommunication {
   constructor() {
-    this.messageQueue = new MessageQueue();
+    this.pendingResponses = new Map();
+    this.messageQueue = new MessageQueue(this.processMessage.bind(this));
     this.messageHistory = [];
-    this.subscriptions = new Map(); // 角色 -> 回调函数
+    this.subscriptions = new Map();
   }
 
-  // 发送消息
   sendMessage(sender, receiver, type, content, metadata = {}) {
     const message = new Message(sender, receiver, type, content, metadata);
     this.messageQueue.enqueue(message);
@@ -84,27 +87,34 @@ class AgentCommunication {
     return message;
   }
 
-  // 发送请求
   sendRequest(sender, receiver, content, metadata = {}) {
-    return this.sendMessage(sender, receiver, 'request', content, metadata);
+    const requestId = metadata.request_id || `req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    return this.sendMessage(sender, receiver, "request", content, {
+      ...metadata,
+      request_id: requestId
+    });
   }
 
-  // 发送响应
   sendResponse(sender, receiver, content, metadata = {}) {
-    return this.sendMessage(sender, receiver, 'response', content, metadata);
+    const correlationId = metadata.correlation_id || metadata.request_id || null;
+    return this.sendMessage(sender, receiver, "response", content, {
+      ...metadata,
+      correlation_id: correlationId
+    });
   }
 
-  // 发送通知
   sendNotification(sender, receiver, content, metadata = {}) {
-    return this.sendMessage(sender, receiver, 'notification', content, metadata);
+    return this.sendMessage(sender, receiver, "notification", content, metadata);
   }
 
-  // 发送错误
   sendError(sender, receiver, content, metadata = {}) {
-    return this.sendMessage(sender, receiver, 'error', content, metadata);
+    const correlationId = metadata.correlation_id || metadata.request_id || null;
+    return this.sendMessage(sender, receiver, "error", content, {
+      ...metadata,
+      correlation_id: correlationId
+    });
   }
 
-  // 订阅角色消息
   subscribe(role, callback) {
     if (!this.subscriptions.has(role)) {
       this.subscriptions.set(role, []);
@@ -112,7 +122,6 @@ class AgentCommunication {
     this.subscriptions.get(role).push(callback);
   }
 
-  // 取消订阅
   unsubscribe(role, callback) {
     if (this.subscriptions.has(role)) {
       const callbacks = this.subscriptions.get(role);
@@ -123,9 +132,57 @@ class AgentCommunication {
     }
   }
 
-  // 处理消息
+  waitForResponse(requestId, timeoutMs = 15000) {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingResponses.delete(requestId);
+        reject(new Error(`Timed out waiting for response to request ${requestId}`));
+      }, timeoutMs);
+
+      this.pendingResponses.set(requestId, {
+        resolve: (message) => {
+          clearTimeout(timeout);
+          resolve(message);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      });
+    });
+  }
+
+  async requestResponse(sender, receiver, content, metadata = {}) {
+    const request = this.sendRequest(sender, receiver, content, metadata);
+    const response = await this.waitForResponse(request.metadata.request_id, metadata.timeout_ms || 15000);
+    return { request, response };
+  }
+
+  async requestToolCreation(sender, receiver, toolSpecs, metadata = {}) {
+    return this.requestResponse(sender, receiver, {
+      request_type: "tool_creation",
+      tool_specs: toolSpecs
+    }, metadata);
+  }
+
+  respondToolCreation(sender, receiver, requestId, content, metadata = {}) {
+    return this.sendResponse(sender, receiver, {
+      request_type: "tool_creation_result",
+      ...content
+    }, {
+      ...metadata,
+      correlation_id: requestId
+    });
+  }
+
   async processMessage(message) {
-    // 通知订阅者
+    const correlationId = message.metadata?.correlation_id;
+    if ((message.type === "response" || message.type === "error") && correlationId && this.pendingResponses.has(correlationId)) {
+      const pending = this.pendingResponses.get(correlationId);
+      this.pendingResponses.delete(correlationId);
+      pending.resolve(message);
+    }
+
     const role = message.receiver;
     if (this.subscriptions.has(role)) {
       const callbacks = this.subscriptions.get(role);
@@ -133,18 +190,16 @@ class AgentCommunication {
         try {
           await callback(message);
         } catch (error) {
-          console.error(`Error processing message callback:`, error);
+          console.error("Error processing message callback:", error);
         }
       }
     }
   }
 
-  // 获取消息历史
   getMessageHistory() {
     return this.messageHistory;
   }
 
-  // 获取消息统计
   getMessageStats() {
     const stats = {
       total: this.messageHistory.length,
@@ -155,26 +210,22 @@ class AgentCommunication {
     };
 
     for (const message of this.messageHistory) {
-      // 按类型统计
       stats.byType[message.type] = (stats.byType[message.type] || 0) + 1;
-      // 按状态统计
       stats.byStatus[message.status] = (stats.byStatus[message.status] || 0) + 1;
-      // 按发送者统计
       stats.bySender[message.sender] = (stats.bySender[message.sender] || 0) + 1;
-      // 按接收者统计
       stats.byReceiver[message.receiver] = (stats.byReceiver[message.receiver] || 0) + 1;
     }
 
     return stats;
   }
 
-  // 清理消息历史
   clearMessageHistory() {
     this.messageHistory = [];
+    this.pendingResponses.clear();
+    this.messageQueue.clear();
   }
 }
 
-// 导出单例
 const agentCommunication = new AgentCommunication();
 
 module.exports = {

@@ -16,7 +16,9 @@ const {
   failAgentTask,
   getAgentRuntimeSnapshot,
   createAgentRegistry,
+  AgentSystem,
   routeCandidate,
+  collectorToolForCandidate,
   selectCandidates,
   runWebResearcher,
   runSpecialistReads,
@@ -1005,44 +1007,69 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
   }
 
   const selected = selectCandidates(candidates, question, plan);
-  const routedTasks = selected.map((candidate) => {
-    const agent = routeCandidate(candidate);
-    const contentType = candidate.content_type || candidate.source_type;
-    recordHandoff(scratchpad, {
-      from: "supervisor",
-      to: agent,
-      source_id: candidate.id,
-      tool: contentType === "video" ? "extract_video_intel" : "deep_read_page"
-    });
-    return {
-      source_id: candidate.id,
-      agent,
-      tool: contentType === "video" ? "extract_video_intel" : "deep_read_page",
-      connector: candidate.connector
-    };
-  });
-
   const specialistReads = await runSpecialistReads(selected, telemetry, runtime);
+  const routedTasks = specialistReads.routed_tasks?.length
+    ? specialistReads.routed_tasks
+    : selected.map((candidate) => {
+        const agent = routeCandidate(candidate);
+        const tool = collectorToolForCandidate(candidate);
+        return {
+          source_id: candidate.id,
+          segment_source_id: candidate.id,
+          agent,
+          tool,
+          connector: candidate.connector
+        };
+      });
   const reads = specialistReads.results.map((item) => item.read);
   const evidenceItems = specialistReads.results.map((item) => item.evidence_unit);
   const fallback = await attemptEphemeralFallbacks(question, specialistReads.failures, telemetry, onProgress);
 
-  for (const candidate of selected) {
-    const contentType = candidate.content_type || candidate.source_type;
+  for (const task of routedTasks) {
+    const candidate = selected.find((item) => item.id === task.source_id);
+    recordHandoff(scratchpad, {
+      from: "supervisor",
+      to: task.agent,
+      source_id: task.source_id,
+      segment_source_id: task.segment_source_id || task.source_id,
+      tool: task.tool,
+      pages: task.pages || null,
+      objective: task.objective || null
+    });
+    if (candidate) {
+      addSharedNote(scratchpad, {
+        type: "parser_task",
+        agent: "supervisor",
+        content: `${candidate.title}: ${task.agent} via ${task.tool}${task.pages ? ` pages ${task.pages.join("-")}` : ""}`
+      });
+    }
+  }
+
+  for (const item of specialistReads.results) {
+    const candidate = item.candidate;
+    const read = item.read;
+    const contentType = read.content_type || read.source_type || candidate.content_type || candidate.source_type;
     const sourceRecord = {
-      source_id: candidate.id,
-      title: candidate.title,
+      source_id: read.source_id,
+      parent_source_id: candidate.id,
+      title: read.title || candidate.title,
       content_type: contentType,
       source_type: contentType,
-      connector: candidate.connector
+      connector: candidate.connector,
+      parser_agent: read.parser_agent || routeCandidate(candidate),
+      tool: read.tool,
+      pages: read.segment_pages || null
     };
     scratchpad.sources_read.push(sourceRecord);
-    recordAgentArtifact(scratchpad, routeCandidate(candidate), {
+    recordAgentArtifact(scratchpad, read.parser_agent || routeCandidate(candidate), {
       type: "source_read",
-      source_id: candidate.id,
-      title: candidate.title,
+      source_id: read.source_id,
+      parent_source_id: candidate.id,
+      title: read.title || candidate.title,
       content_type: contentType,
-      connector: candidate.connector
+      connector: candidate.connector,
+      tool: read.tool,
+      pages: read.segment_pages || null
     });
   }
 
@@ -1094,6 +1121,7 @@ async function runResearch({ question, mode, onProgress }) {
   }
   const telemetry = {
     agents,
+    agent_system: new AgentSystem(),
     agent_runtime: agentRuntime,
     events: [],
     failures: [],
@@ -1152,6 +1180,12 @@ async function runResearch({ question, mode, onProgress }) {
       supervisor: {
         queries,
         dispatched_tasks: round.routed_tasks
+      },
+      collector_layer: {
+        video_parser: round.routed_tasks.filter((item) => item.agent === "video_parser").length,
+        long_text_collector: round.routed_tasks.filter((item) => item.agent === "long_text_collector").length,
+        chart_parser: round.routed_tasks.filter((item) => item.agent === "chart_parser").length,
+        table_parser: round.routed_tasks.filter((item) => item.agent === "table_parser").length
       },
       fact_verifier: {
         conflict_count: verification.conflicts.length,

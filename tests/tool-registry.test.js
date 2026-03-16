@@ -1,11 +1,18 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { ToolRegistry } = require("../src/source-connectors");
-const { runSpecialistReads, createAgentRegistry, createAgentRuntime } = require("../src/agent-orchestrator");
+const {
+  runSpecialistReads,
+  createAgentRegistry,
+  createAgentRuntime,
+  routeCandidate,
+  collectorToolForCandidate
+} = require("../src/agent-orchestrator");
 
 test("ToolRegistry should expose core capabilities and enforce custom validation", () => {
   const capabilityIds = ToolRegistry.getToolCapabilities().map((item) => item.id);
   assert.ok(capabilityIds.includes("analyze_document_multimodal"));
+  assert.ok(capabilityIds.includes("layout_analysis"));
   assert.ok(capabilityIds.includes("read_document_intel"));
   assert.ok(capabilityIds.includes("deep_read_page"));
   assert.ok(capabilityIds.includes("extract_video_intel"));
@@ -24,6 +31,208 @@ test("ToolRegistry should expose core capabilities and enforce custom validation
     }
   });
   assert.equal(validRead.success, true);
+});
+
+test("layout_analysis should derive text, table, and visual parser tasks for mixed documents", async () => {
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalFetch = global.fetch;
+  process.env.OPENAI_API_KEY = "test-key";
+
+  global.fetch = async (url, options) => {
+    if (!options?.body) {
+      return {
+        ok: true,
+        text: async () => "Title: Mixed Report\n\nMarkdown Content:\n# Overview\nMarket growth is accelerating.\n\n# Findings\nRevenue table and chart summary."
+      };
+    }
+
+    return {
+      ok: true,
+      json: async () => ({
+        output: [
+          {
+            type: "message",
+            content: [
+              {
+                type: "output_text",
+                text: JSON.stringify({
+                  summary: "Mixed document summary",
+                  key_points: ["growth continues"],
+                  structured_facts: [],
+                  visual_observations: ["bar chart shows a sharp Q4 increase"]
+                })
+              }
+            ]
+          }
+        ]
+      })
+    };
+  };
+
+  try {
+    const execution = await ToolRegistry.executeTool("layout_analysis", {
+      candidate: {
+        id: "doc-layout",
+        title: "Mixed Layout PDF",
+        url: "https://example.com/report.pdf",
+        connector: "bing_web",
+        content_type: "document",
+        source_type: "document",
+        metadata: {
+          page_count: 6,
+          page_images: ["https://example.com/page-1.png"]
+        }
+      }
+    });
+
+    assert.equal(execution.success, true);
+    assert.equal(execution.data.layout.total_pages, 6);
+    assert.ok(execution.data.layout.task_suggestions.some((item) => item.agent === "long_text_collector"));
+    assert.ok(execution.data.layout.task_suggestions.some((item) => item.agent === "chart_parser"));
+  } finally {
+    if (originalApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalApiKey;
+    }
+    global.fetch = originalFetch;
+  }
+});
+
+test("layout_analysis should use llm mode when the model returns block-level layout output", async () => {
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalFetch = global.fetch;
+  process.env.OPENAI_API_KEY = "test-key";
+
+  global.fetch = async (url, options) => {
+    if (!options?.body) {
+      return {
+        ok: true,
+        text: async () => "Title: Mixed Report\n\nMarkdown Content:\n# Overview\nMarket growth is accelerating."
+      };
+    }
+
+    const body = JSON.parse(options.body);
+    if (body.text?.format?.name === "document_multimodal_summary") {
+      return {
+        ok: true,
+        json: async () => ({
+          output: [
+            {
+              type: "message",
+              content: [
+                {
+                  type: "output_text",
+                  text: JSON.stringify({
+                    summary: "Visual summary",
+                    key_points: ["growth continues"],
+                    structured_facts: [],
+                    visual_observations: ["bar chart shows a sharp Q4 increase"]
+                  })
+                }
+              ]
+            }
+          ]
+        })
+      };
+    }
+
+    assert.equal(body.text?.format?.name, "document_layout_analysis");
+    return {
+      ok: true,
+      json: async () => ({
+        output: [
+          {
+            type: "message",
+            content: [
+              {
+                type: "output_text",
+                text: JSON.stringify({
+                  total_pages: 10,
+                  blocks: [
+                    {
+                      block_id: "doc-layout-llm:text",
+                      modality: "text",
+                      agent: "long_text_collector",
+                      pages: [1, 3],
+                      summary: "Opening text sections"
+                    },
+                    {
+                      block_id: "doc-layout-llm:table",
+                      modality: "table",
+                      agent: "table_parser",
+                      pages: [4, 4],
+                      summary: "Main KPI table"
+                    },
+                    {
+                      block_id: "doc-layout-llm:visual",
+                      modality: "visual",
+                      agent: "chart_parser",
+                      pages: [5, 5],
+                      summary: "Revenue bar chart"
+                    }
+                  ],
+                  task_suggestions: [
+                    {
+                      task_id: "task:text",
+                      agent: "long_text_collector",
+                      capability: "read_document",
+                      pages: [1, 3],
+                      objective: "Summarize opening sections"
+                    },
+                    {
+                      task_id: "task:table",
+                      agent: "table_parser",
+                      capability: "parse_table",
+                      pages: [4, 4],
+                      objective: "Extract KPI table"
+                    },
+                    {
+                      task_id: "task:visual",
+                      agent: "chart_parser",
+                      capability: "analyze_visual_document",
+                      pages: [5, 5],
+                      objective: "Analyze revenue chart"
+                    }
+                  ],
+                  dominant_modalities: ["text", "table", "visual"]
+                })
+              }
+            ]
+          }
+        ]
+      })
+    };
+  };
+
+  try {
+    const execution = await ToolRegistry.executeTool("layout_analysis", {
+      candidate: {
+        id: "doc-layout-llm",
+        title: "Mixed Layout PDF",
+        url: "https://example.com/report.pdf",
+        connector: "bing_web",
+        content_type: "document",
+        source_type: "document",
+        metadata: {
+          page_count: 10,
+          page_images: ["https://example.com/page-1.png"]
+        }
+      }
+    });
+
+    assert.equal(execution.success, true);
+    assert.equal(execution.data.layout_analysis_mode, "llm");
+    assert.equal(execution.data.layout.blocks.length, 3);
+    assert.ok(execution.data.layout.task_suggestions.some((item) => item.agent === "table_parser"));
+  } finally {
+    if (originalApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalApiKey;
+    }
+    global.fetch = originalFetch;
+  }
 });
 
 test("read_document_intel should parse csv tables into structured output", async () => {
@@ -343,8 +552,291 @@ test("runSpecialistReads should read through ToolRegistry adapters", async () =>
     assert.equal(result.results.length, 2);
     assert.equal(result.failures.length, 0);
     assert.equal(runtime.tasks.length, 2);
-    assert.equal(runtime.agents.deep_analyst.completed_tasks, 1);
-    assert.equal(runtime.agents.multimedia.completed_tasks, 1);
+    assert.equal(runtime.agents.long_text_collector.completed_tasks, 1);
+    assert.equal(runtime.agents.video_parser.completed_tasks, 1);
+  } finally {
+    ToolRegistry.executeTool = originalExecuteTool;
+  }
+});
+
+test("runSpecialistReads should request a recovery tool after read failure and retry once", async () => {
+  const originalExecuteTool = ToolRegistry.executeTool;
+  const originalRegisterTool = ToolRegistry.registerTool;
+  const registeredTools = new Map();
+  let requestCount = 0;
+
+  ToolRegistry.registerTool = function registerTool(toolDefinition) {
+    registeredTools.set(toolDefinition.id, toolDefinition);
+  };
+
+  ToolRegistry.executeTool = async (toolId, input) => {
+    if (toolId === "deep_read_page") {
+      return {
+        success: false,
+        error: {
+          message: "Primary reader failed"
+        }
+      };
+    }
+
+    if (registeredTools.has(toolId)) {
+      return {
+        success: true,
+        data: await registeredTools.get(toolId).execute(input)
+      };
+    }
+
+    throw new Error(`Unexpected tool: ${toolId}`);
+  };
+
+  try {
+    const telemetry = {
+      events: [],
+      failures: [],
+      agent_system: {
+        async requestToolCreation(requester, toolSpecs) {
+          requestCount += 1;
+          const tool = {
+            id: "recovery_tool",
+            name: toolSpecs[0].name,
+            description: toolSpecs[0].description,
+            parameters: toolSpecs[0].parameters,
+            execute: async ({ candidate }) => ({
+              source_id: candidate.id,
+              title: candidate.title,
+              url: candidate.url,
+              content_type: candidate.content_type,
+              source_type: candidate.source_type,
+              tool: "recovery_tool",
+              key_points: ["recovered through created tool"],
+              timeline: [],
+              transcript: [],
+              facts: []
+            }),
+            created_for: requester,
+            request_id: "req_recovery"
+          };
+          ToolRegistry.registerTool(tool);
+          return {
+            request_type: "tool_creation_result",
+            success: true,
+            count: 1,
+            tools: [tool]
+          };
+        }
+      }
+    };
+
+    const runtime = createAgentRuntime(createAgentRegistry());
+    const selected = [
+      {
+        id: "web-2",
+        title: "Recoverable source",
+        url: "https://example.com/recovery",
+        connector: "bing_web",
+        content_type: "web",
+        source_type: "web"
+      }
+    ];
+
+    const result = await runSpecialistReads(selected, telemetry, runtime);
+    assert.equal(requestCount, 1);
+    assert.equal(result.results.length, 1);
+    assert.equal(result.failures.length, 0);
+    assert.equal(result.results[0].read.source_id, "web-2");
+    assert.equal(runtime.agents.long_text_collector.completed_tasks, 1);
+    assert.equal(telemetry.tool_creation_requests.length, 1);
+  } finally {
+    ToolRegistry.executeTool = originalExecuteTool;
+    ToolRegistry.registerTool = originalRegisterTool;
+  }
+});
+
+test("chart-heavy document candidates should route to chart_parser with document intel", () => {
+  const candidate = {
+    id: "chart-1",
+    title: "Revenue chart dashboard",
+    url: "https://example.com/report.pdf",
+    connector: "bing_web",
+    content_type: "document",
+    source_type: "document",
+    metadata: {
+      mime_type: "application/pdf",
+      page_images: ["https://example.com/report-page-1.png"]
+    }
+  };
+
+  assert.equal(routeCandidate(candidate), "chart_parser");
+  assert.equal(collectorToolForCandidate(candidate), "read_document_intel");
+});
+
+test("runSpecialistReads should resolve parser tools through the agent system interface", async () => {
+  const originalExecuteTool = ToolRegistry.executeTool;
+  const calls = [];
+
+  ToolRegistry.executeTool = async (toolId, input) => {
+    calls.push({ toolId, input });
+    return {
+      success: true,
+      data: {
+        source_id: input.candidate.id,
+        title: input.candidate.title,
+        url: input.candidate.url,
+        content_type: input.candidate.content_type,
+        source_type: input.candidate.source_type,
+        tool: toolId,
+        key_points: ["resolved by agent system"],
+        timeline: [],
+        transcript: [],
+        facts: []
+      }
+    };
+  };
+
+  try {
+    const telemetry = {
+      events: [],
+      failures: [],
+      agent_system: {
+        resolveToolForTask({ agent, capability, candidate, preferred_tool_id }) {
+          assert.equal(agent, "long_text_collector");
+          assert.equal(capability, "read_web_page");
+          assert.equal(preferred_tool_id, "deep_read_page");
+          assert.equal(candidate.id, "web-3");
+          return {
+            tool_id: "deep_read_page",
+            reason: "matched_tool_capability"
+          };
+        }
+      }
+    };
+    const runtime = createAgentRuntime(createAgentRegistry());
+    const selected = [
+      {
+        id: "web-3",
+        title: "Web explainer",
+        url: "https://example.com/explainer",
+        connector: "bing_web",
+        content_type: "web",
+        source_type: "web"
+      }
+    ];
+
+    const result = await runSpecialistReads(selected, telemetry, runtime);
+    assert.equal(result.results.length, 1);
+    assert.equal(result.failures.length, 0);
+    assert.deepEqual(calls.map((item) => item.toolId), ["deep_read_page"]);
+    assert.equal(runtime.agents.long_text_collector.completed_tasks, 1);
+  } finally {
+    ToolRegistry.executeTool = originalExecuteTool;
+  }
+});
+
+test("runSpecialistReads should split mixed documents into text, table, and visual parser outputs", async () => {
+  const originalExecuteTool = ToolRegistry.executeTool;
+  const calls = [];
+
+  ToolRegistry.executeTool = async (toolId, input) => {
+    calls.push({ toolId, input });
+    if (toolId === "layout_analysis") {
+      assert.equal(input.read.source_id, "doc-mixed-1");
+      return {
+        success: true,
+        data: {
+          layout: {
+            total_pages: 10,
+            blocks: [
+              { block_id: "text", modality: "text", agent: "long_text_collector", pages: [1, 3] },
+              { block_id: "table", modality: "table", agent: "table_parser", pages: [4, 4] },
+              { block_id: "visual", modality: "visual", agent: "chart_parser", pages: [5, 5] }
+            ],
+            task_suggestions: [
+              { task_id: "t1", agent: "long_text_collector", capability: "read_document", pages: [1, 3], objective: "Summarize text" },
+              { task_id: "t2", agent: "table_parser", capability: "parse_table", pages: [4, 4], objective: "Extract table" },
+              { task_id: "t3", agent: "chart_parser", capability: "analyze_visual_document", pages: [5, 5], objective: "Analyze chart" }
+            ]
+          }
+        }
+      };
+    }
+
+    if (toolId === "analyze_document_multimodal") {
+      return {
+        success: true,
+        data: {
+          summary: "Chart analysis summary",
+          key_points: ["Q4 is the strongest quarter"],
+          structured_facts: [
+            { subject: "Q4 revenue", claim: "Q4 outperforms all other quarters", value: null, unit: null }
+          ],
+          visual_observations: ["The tallest bar appears in Q4"]
+        }
+      };
+    }
+
+    if (toolId === "read_document_intel") {
+      return {
+        success: true,
+        data: {
+          source_id: input.candidate.id,
+          title: input.candidate.title,
+          url: input.candidate.url,
+          content_type: "document",
+          source_type: "document",
+          tool: "read_document_intel",
+          markdown: "# Overview\nGrowth accelerated.\n\n# Appendix\nSupporting notes.",
+          key_points: ["Market growth accelerated", "Appendix contains support"],
+          sections: [
+            { heading: "Overview", excerpt: "Growth accelerated." },
+            { heading: "Appendix", excerpt: "Supporting notes." }
+          ],
+          facts: [{ subject: "market", kind: "document_fact", claim: "Growth accelerated", value: null, unit: null }],
+          table_data: {
+            headers: ["year", "revenue"],
+            rows: [{ year: "2024", revenue: "1.2M" }]
+          },
+          visual_observations: ["Q4 shows the highest revenue bar"],
+          page_images: ["https://example.com/page-5.png"],
+          source_metadata: {
+            page_images: ["https://example.com/page-5.png"],
+            preview_image: "https://example.com/page-5.png"
+          }
+        }
+      };
+    }
+
+    throw new Error(`Unexpected tool: ${toolId}`);
+  };
+
+  try {
+    const telemetry = { events: [], failures: [], agent_system: null };
+    const runtime = createAgentRuntime(createAgentRegistry());
+    const selected = [
+      {
+        id: "doc-mixed-1",
+        title: "Industry report",
+        url: "https://example.com/industry-report.pdf",
+        connector: "bing_web",
+        content_type: "document",
+        source_type: "document",
+        metadata: {
+          mime_type: "application/pdf"
+        }
+      }
+    ];
+
+    const result = await runSpecialistReads(selected, telemetry, runtime);
+    assert.equal(result.results.length, 3);
+    assert.ok(result.results.some((item) => item.read.parser_agent === "long_text_collector"));
+    assert.ok(result.results.some((item) => item.read.parser_agent === "table_parser"));
+    assert.ok(result.results.some((item) => item.read.parser_agent === "chart_parser"));
+    assert.equal(calls.filter((item) => item.toolId === "read_document_intel").length, 1);
+    assert.equal(calls.filter((item) => item.toolId === "layout_analysis").length, 1);
+    assert.equal(calls.filter((item) => item.toolId === "analyze_document_multimodal").length, 1);
+    assert.equal(result.routed_tasks.length, 3);
+    assert.ok(runtime.agents.long_text_collector.completed_tasks >= 1);
+    assert.ok(runtime.agents.table_parser.completed_tasks >= 1);
+    assert.ok(runtime.agents.chart_parser.completed_tasks >= 1);
   } finally {
     ToolRegistry.executeTool = originalExecuteTool;
   }

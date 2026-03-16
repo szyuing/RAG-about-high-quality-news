@@ -31,9 +31,118 @@ const samplePrompts = [
 
 let sourceCatalog = [];
 
+const TOOL_CAPABILITY_HINTS = {
+  read_document_intel: [
+    "read_document",
+    "read_document_intel",
+    "parse_pdf",
+    "parse_table",
+    "parse_spreadsheet",
+    "parse_chart_document",
+    "collect_document"
+  ],
+  analyze_document_multimodal: [
+    "analyze_document_multimodal",
+    "analyze_chart",
+    "analyze_visual_document",
+    "analyze_page_images"
+  ],
+  layout_analysis: [
+    "layout_analysis",
+    "analyze_document_layout",
+    "document_layout_scan",
+    "split_document_modalities"
+  ],
+  deep_read_page: [
+    "read_web_page",
+    "collect_long_text",
+    "read_article",
+    "read_page"
+  ],
+  extract_video_intel: [
+    "parse_video",
+    "extract_video_intel",
+    "read_video",
+    "extract_transcript"
+  ],
+  cross_check_facts: [
+    "verify_facts",
+    "cross_check_facts",
+    "fact_verification"
+  ]
+};
+
+function normalizeCapability(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function getToolCapabilityHints(toolId) {
+  return TOOL_CAPABILITY_HINTS[toolId] || [];
+}
+
+function scoreToolForTask(tool, task = {}) {
+  if (!tool || tool.status === "deprecated") {
+    return -1;
+  }
+
+  const preferredToolId = task.preferred_tool_id || task.preferredToolId || null;
+  const capability = normalizeCapability(task.capability);
+  const agent = String(task.agent || "").toLowerCase();
+  const contentType = String(task.candidate?.content_type || task.candidate?.source_type || "").toLowerCase();
+  const documentKind = String(task.candidate?.metadata?.mime_type || task.candidate?.url || "").toLowerCase();
+  const hints = getToolCapabilityHints(tool.id);
+  let score = 0;
+
+  if (preferredToolId && tool.id === preferredToolId) {
+    score += 10;
+  }
+  if (capability && hints.includes(capability)) {
+    score += 8;
+  }
+  if (capability && tool.id === capability) {
+    score += 7;
+  }
+  if (agent === "video_parser" && tool.id === "extract_video_intel") {
+    score += 6;
+  }
+  if ((agent === "chart_parser" || agent === "pdf_parser" || agent === "table_parser") && tool.id === "read_document_intel") {
+    score += 6;
+  }
+  if ((agent === "long_text_collector" || agent === "web_page_parser") && tool.id === "deep_read_page") {
+    score += 6;
+  }
+  if (agent === "fact_verifier" && tool.id === "cross_check_facts") {
+    score += 6;
+  }
+  if (contentType === "video" && tool.id === "extract_video_intel") {
+    score += 5;
+  }
+  if (contentType === "document" && tool.id === "read_document_intel") {
+    score += 5;
+  }
+  if (contentType === "web" && tool.id === "deep_read_page") {
+    score += 5;
+  }
+  if (/pdf|xlsx|xls|csv|tsv/.test(documentKind) && tool.id === "read_document_intel") {
+    score += 3;
+  }
+  if (task.candidate?.metadata?.page_images?.length && tool.id === "read_document_intel") {
+    score += 2;
+  }
+
+  return score;
+}
+
 // 标准化工具接口
 const ToolRegistry = {
   tools: new Map(),
+  toolVersions: new Map(),
+  toolAliases: new Map(),
+  lifecycleEvents: [],
   
   registerTool(toolDefinition) {
     if (!toolDefinition.id) {
@@ -45,8 +154,12 @@ const ToolRegistry = {
     if (!toolDefinition.execute) {
       throw new Error('Tool must have an execute function');
     }
-    
-    this.tools.set(toolDefinition.id, {
+
+    const baseToolId = toolDefinition.base_tool_id || toolDefinition.id;
+    const version = String(toolDefinition.version || "1.0.0");
+    const registeredAt = new Date().toISOString();
+    const existingActive = this.tools.get(toolDefinition.id);
+    const normalized = {
       id: toolDefinition.id,
       name: toolDefinition.name,
       description: toolDefinition.description || '',
@@ -54,16 +167,176 @@ const ToolRegistry = {
       execute: toolDefinition.execute,
       validate: toolDefinition.validate || null,
       inputSchema: toolDefinition.inputSchema || null,
-      outputSchema: toolDefinition.outputSchema || null
+      outputSchema: toolDefinition.outputSchema || null,
+      base_tool_id: baseToolId,
+      version,
+      status: toolDefinition.status || "active",
+      source: toolDefinition.source || "builtin",
+      created_by: toolDefinition.created_by || null,
+      created_for: toolDefinition.created_for || null,
+      promoted_to_builtin: Boolean(toolDefinition.promoted_to_builtin),
+      replaced_by: null,
+      supersedes: toolDefinition.supersedes || existingActive?.id || null,
+      request_id: toolDefinition.request_id || null,
+      registered_at: registeredAt
+    };
+
+    if (existingActive && existingActive.id !== normalized.id) {
+      existingActive.status = "superseded";
+      existingActive.replaced_by = normalized.id;
+      this.lifecycleEvents.push({
+        type: "superseded",
+        tool_id: existingActive.id,
+        base_tool_id: baseToolId,
+        replaced_by: normalized.id,
+        at: registeredAt
+      });
+    }
+
+    this.tools.set(toolDefinition.id, normalized);
+    this.toolAliases.set(baseToolId, toolDefinition.id);
+
+    const history = this.toolVersions.get(baseToolId) || [];
+    history.push(normalized);
+    this.toolVersions.set(baseToolId, history);
+    this.lifecycleEvents.push({
+      type: "registered",
+      tool_id: normalized.id,
+      base_tool_id: baseToolId,
+      version,
+      at: registeredAt
     });
   },
   
   getTool(toolId) {
-    return this.tools.get(toolId);
+    const resolvedId = this.toolAliases.get(toolId) || toolId;
+    return this.tools.get(resolvedId);
   },
   
   getTools() {
     return Array.from(this.tools.values());
+  },
+
+  getToolHistory(toolId) {
+    const current = this.getTool(toolId);
+    const baseToolId = current?.base_tool_id || toolId;
+    return (this.toolVersions.get(baseToolId) || []).map((item) => ({ ...item }));
+  },
+
+  deprecateTool(toolId, reason = "deprecated") {
+    const tool = this.getTool(toolId);
+    if (!tool) {
+      throw new Error(`Tool not found: ${toolId}`);
+    }
+    tool.status = "deprecated";
+    tool.deprecated_at = new Date().toISOString();
+    tool.deprecation_reason = reason;
+    this.lifecycleEvents.push({
+      type: "deprecated",
+      tool_id: tool.id,
+      base_tool_id: tool.base_tool_id,
+      reason,
+      at: tool.deprecated_at
+    });
+    return { ...tool };
+  },
+
+  rollbackTool(toolId, targetToolId = null) {
+    const current = this.getTool(toolId);
+    if (!current) {
+      throw new Error(`Tool not found: ${toolId}`);
+    }
+
+    const history = this.toolVersions.get(current.base_tool_id) || [];
+    const target = targetToolId
+      ? history.find((item) => item.id === targetToolId)
+      : [...history].reverse().find((item) => item.id !== current.id && item.status !== "deprecated");
+
+    if (!target) {
+      throw new Error(`No rollback target found for ${toolId}`);
+    }
+
+    current.status = "superseded";
+    current.replaced_by = target.id;
+    target.status = "active";
+    target.reactivated_at = new Date().toISOString();
+    this.toolAliases.set(current.base_tool_id, target.id);
+    this.lifecycleEvents.push({
+      type: "rolled_back",
+      tool_id: current.id,
+      base_tool_id: current.base_tool_id,
+      target_tool_id: target.id,
+      at: target.reactivated_at
+    });
+    return { active: { ...target }, previous: { ...current } };
+  },
+
+  promoteTool(toolId, reason = "promoted_to_builtin_candidate") {
+    const tool = this.getTool(toolId);
+    if (!tool) {
+      throw new Error(`Tool not found: ${toolId}`);
+    }
+    tool.promoted_to_builtin = true;
+    tool.promotion_reason = reason;
+    tool.promoted_at = new Date().toISOString();
+    this.lifecycleEvents.push({
+      type: "promoted",
+      tool_id: tool.id,
+      base_tool_id: tool.base_tool_id,
+      reason,
+      at: tool.promoted_at
+    });
+    return { ...tool };
+  },
+
+  getLifecycleEvents(toolId = null) {
+    if (!toolId) {
+      return this.lifecycleEvents.map((item) => ({ ...item }));
+    }
+    const current = this.getTool(toolId);
+    const baseToolId = current?.base_tool_id || toolId;
+    return this.lifecycleEvents
+      .filter((item) => item.base_tool_id === baseToolId || item.tool_id === toolId)
+      .map((item) => ({ ...item }));
+  },
+
+  resolveToolForTask(task = {}) {
+    const preferredToolId = task.preferred_tool_id || task.preferredToolId || null;
+    const preferredTool = preferredToolId ? this.getTool(preferredToolId) : null;
+    if (preferredTool && preferredTool.status !== "deprecated") {
+      return {
+        tool_id: preferredTool.id,
+        capability: normalizeCapability(task.capability),
+        reason: preferredToolId === task.capability
+          ? "matched_requested_tool_id"
+          : "matched_preferred_tool",
+        tool: { ...preferredTool }
+      };
+    }
+
+    const ranked = this.getTools()
+      .map((tool) => ({
+        tool,
+        score: scoreToolForTask(tool, task)
+      }))
+      .filter((item) => item.score >= 0)
+      .sort((left, right) => right.score - left.score);
+
+    const best = ranked[0];
+    if (!best || best.score <= 0) {
+      return null;
+    }
+
+    return {
+      tool_id: best.tool.id,
+      capability: normalizeCapability(task.capability),
+      reason: "matched_tool_capability",
+      tool: { ...best.tool },
+      alternatives: ranked.slice(1, 3).map((item) => ({
+        tool_id: item.tool.id,
+        score: item.score
+      }))
+    };
   },
   
   async executeTool(toolId, input) {
@@ -73,6 +346,9 @@ const ToolRegistry = {
     }
     
     try {
+      if (tool.status === "deprecated") {
+        throw new Error(`Tool is deprecated: ${tool.id}`);
+      }
       this.validateToolInput(toolId, input);
       const result = await tool.execute(input);
       return {
@@ -121,6 +397,11 @@ const ToolRegistry = {
   getToolCapabilities() {
     return this.getTools().map(tool => ({
       id: tool.id,
+      base_tool_id: tool.base_tool_id,
+      version: tool.version,
+      status: tool.status,
+      source: tool.source,
+      promoted_to_builtin: tool.promoted_to_builtin,
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters,
@@ -757,6 +1038,206 @@ async function analyzeDocumentWithMultimodalModel(input) {
   return rawText ? JSON.parse(rawText) : null;
 }
 
+function estimateDocumentLayoutPages(candidate, read) {
+  const hintedPages = Number(candidate?.metadata?.page_count || candidate?.metadata?.pages || 0);
+  if (Number.isFinite(hintedPages) && hintedPages > 0) {
+    return hintedPages;
+  }
+  const imagePages = Array.isArray(read?.page_images) ? read.page_images.length : 0;
+  const sectionPages = Math.max(1, Math.ceil((read?.sections?.length || 0) / 3));
+  const tablePages = read?.table_data?.rows?.length ? 1 : 0;
+  return Math.max(1, imagePages, sectionPages, tablePages);
+}
+
+function deriveDocumentLayout(read, candidate = {}) {
+  const totalPages = estimateDocumentLayoutPages(candidate, read);
+  const blocks = [];
+  const taskSuggestions = [];
+  const sections = read.sections || [];
+  const textSections = sections.slice(0, 8);
+  const pageImages = Array.isArray(read.page_images) ? read.page_images : [];
+  const visualObservations = Array.isArray(read.visual_observations) ? read.visual_observations : [];
+
+  if (textSections.length || read.markdown) {
+    const startPage = 1;
+    const endPage = Math.max(1, Math.min(totalPages, Math.max(1, Math.ceil(textSections.length / 3) || 1)));
+    blocks.push({
+      block_id: `${read.source_id || candidate.id}:text`,
+      modality: "text",
+      agent: "long_text_collector",
+      pages: [startPage, endPage],
+      summary: textSections.map((section) => section.heading).filter(Boolean).join(", ") || "Document text sections"
+    });
+    taskSuggestions.push({
+      task_id: `${read.source_id || candidate.id}:task:text`,
+      agent: "long_text_collector",
+      capability: "read_document",
+      pages: [startPage, endPage],
+      objective: "Summarize the document text sections and extract core claims."
+    });
+  }
+
+  if (read.table_data?.rows?.length) {
+    const tablePage = Math.min(totalPages, Math.max(1, (blocks.length ? blocks[blocks.length - 1].pages[1] : 1) + 1));
+    blocks.push({
+      block_id: `${read.source_id || candidate.id}:table`,
+      modality: "table",
+      agent: "table_parser",
+      pages: [tablePage, tablePage],
+      summary: `Structured table with ${read.table_data.rows.length} rows`
+    });
+    taskSuggestions.push({
+      task_id: `${read.source_id || candidate.id}:task:table`,
+      agent: "table_parser",
+      capability: "parse_table",
+      pages: [tablePage, tablePage],
+      objective: "Extract the table into structured JSON rows."
+    });
+  }
+
+  if (pageImages.length || visualObservations.length) {
+    const visualStartPage = Math.min(totalPages, Math.max(1, totalPages - Math.max(0, pageImages.length - 1)));
+    const visualEndPage = Math.min(totalPages, Math.max(visualStartPage, visualStartPage + Math.max(0, pageImages.length - 1)));
+    blocks.push({
+      block_id: `${read.source_id || candidate.id}:visual`,
+      modality: "visual",
+      agent: "chart_parser",
+      pages: [visualStartPage, visualEndPage],
+      summary: visualObservations[0] || "Layout contains chart or image evidence"
+    });
+    taskSuggestions.push({
+      task_id: `${read.source_id || candidate.id}:task:visual`,
+      agent: "chart_parser",
+      capability: "analyze_visual_document",
+      pages: [visualStartPage, visualEndPage],
+      objective: "Describe the visual evidence and identify the most important trend."
+    });
+  }
+
+  return {
+    source_id: read.source_id || candidate.id || null,
+    total_pages: totalPages,
+    blocks,
+    task_suggestions: taskSuggestions,
+    dominant_modalities: Array.from(new Set(blocks.map((block) => block.modality)))
+  };
+}
+
+async function analyzeDocumentLayoutWithModel(candidate, read, fallbackLayout) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return null;
+  }
+
+  const totalPages = fallbackLayout?.total_pages || estimateDocumentLayoutPages(candidate, read);
+  const prompt = [
+    "Analyze this document layout for a multi-agent parsing workflow.",
+    "Return strict JSON describing page-level blocks and parser task suggestions.",
+    "Use parser agents from this fixed set only: long_text_collector, table_parser, chart_parser.",
+    "Use modalities from this fixed set only: text, table, visual.",
+    "Infer page ranges conservatively from the available markdown, images, and table hints.",
+    "",
+    `Title: ${candidate.title || candidate.url || "document"}`,
+    `Document kind: ${read.document_kind || "unknown"}`,
+    `Estimated total pages: ${totalPages}`,
+    `Has table data: ${read.table_data?.rows?.length ? "yes" : "no"}`,
+    `Page image count: ${Array.isArray(read.page_images) ? read.page_images.length : 0}`,
+    "",
+    "Sections:",
+    JSON.stringify((read.sections || []).slice(0, 8), null, 2),
+    "",
+    "Visual observations:",
+    JSON.stringify((read.visual_observations || []).slice(0, 4), null, 2),
+    "",
+    "Markdown preview:",
+    String(read.markdown || "").slice(0, 8000)
+  ].join("\n");
+
+  const response = await fetch(process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    signal: AbortSignal.timeout(25000),
+    body: JSON.stringify({
+      model: process.env.OPENAI_LAYOUT_MODEL || process.env.OPENAI_DOCUMENT_MODEL || "gpt-4o-mini",
+      store: false,
+      input: prompt,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "document_layout_analysis",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              total_pages: { type: "integer", minimum: 1 },
+              blocks: {
+                type: "array",
+                maxItems: 8,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    block_id: { type: "string" },
+                    modality: { type: "string", enum: ["text", "table", "visual"] },
+                    agent: { type: "string", enum: ["long_text_collector", "table_parser", "chart_parser"] },
+                    pages: {
+                      type: "array",
+                      minItems: 2,
+                      maxItems: 2,
+                      items: { type: "integer", minimum: 1 }
+                    },
+                    summary: { type: "string" }
+                  },
+                  required: ["block_id", "modality", "agent", "pages", "summary"]
+                }
+              },
+              task_suggestions: {
+                type: "array",
+                maxItems: 8,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    task_id: { type: "string" },
+                    agent: { type: "string", enum: ["long_text_collector", "table_parser", "chart_parser"] },
+                    capability: { type: "string" },
+                    pages: {
+                      type: "array",
+                      minItems: 2,
+                      maxItems: 2,
+                      items: { type: "integer", minimum: 1 }
+                    },
+                    objective: { type: "string" }
+                  },
+                  required: ["task_id", "agent", "capability", "pages", "objective"]
+                }
+              },
+              dominant_modalities: {
+                type: "array",
+                items: { type: "string", enum: ["text", "table", "visual"] },
+                maxItems: 3
+              }
+            },
+            required: ["total_pages", "blocks", "task_suggestions", "dominant_modalities"]
+          }
+        }
+      }
+    })
+  });
+
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || `Document layout analysis failed with HTTP ${response.status}`);
+  }
+
+  const rawText = extractTextFromResponsePayload(payload);
+  return rawText ? JSON.parse(rawText) : null;
+}
+
 async function readDocumentSource(candidate) {
   const normalizedCandidate = normalizeCandidateMediaMetadata(candidate);
   const documentKind = inferDocumentKindFromUrl(normalizedCandidate.url, normalizedCandidate.metadata);
@@ -878,6 +1359,35 @@ async function readDocumentSource(candidate) {
       page_images: pageImages,
       preview_image: pageImages[0] || normalizedCandidate.metadata?.preview_image || null
     }
+  };
+}
+
+async function analyzeDocumentLayout(candidate, readOverride = null) {
+  const read = readOverride || await readDocumentSource(candidate);
+  const fallbackLayout = deriveDocumentLayout(read, candidate);
+  let layout = fallbackLayout;
+
+  try {
+    const llmLayout = await analyzeDocumentLayoutWithModel(candidate, read, fallbackLayout);
+    if (llmLayout?.blocks?.length || llmLayout?.task_suggestions?.length) {
+      layout = {
+        source_id: candidate.id,
+        ...llmLayout
+      };
+    }
+  } catch (_) {
+    layout = fallbackLayout;
+  }
+
+  return {
+    source_id: candidate.id,
+    title: candidate.title,
+    url: candidate.url,
+    document_kind: read.document_kind,
+    layout,
+    layout_analysis_mode: layout === fallbackLayout ? "heuristic" : "llm",
+    source_metadata: read.source_metadata,
+    read
   };
 }
 
@@ -2637,6 +3147,41 @@ async function executeReadTool(toolId, input) {
 
 // 注册核心工具
 ToolRegistry.registerTool({
+  id: 'layout_analysis',
+  name: 'Layout Analysis',
+  description: 'Scan a complex document and return page/block level modality hints plus parser task suggestions.',
+  parameters: [
+    {
+      name: 'url',
+      type: 'string',
+      required: false,
+      description: 'Document URL'
+    },
+    {
+      name: 'candidate',
+      type: 'object',
+      required: false,
+      description: 'Structured document candidate'
+    },
+    {
+      name: 'read',
+      type: 'object',
+      required: false,
+      description: 'Optional pre-read document snapshot to avoid re-reading the same source'
+    }
+  ],
+  validate(input) {
+    if (!input?.read && !input?.url && !input?.candidate?.url) {
+      throw new Error('Either read, url, or candidate.url is required');
+    }
+  },
+  async execute(input) {
+    const candidate = buildCandidateFromToolInput('layout_analysis', input);
+    return analyzeDocumentLayout(candidate, input.read || null);
+  }
+});
+
+ToolRegistry.registerTool({
   id: 'read_document_intel',
   name: 'Read Document Intel',
   description: 'Read PDFs, tables, and complex documents with native parsing plus optional model-assisted summarization.',
@@ -2961,6 +3506,40 @@ ToolRegistry.registerTool({
       VIDEO_PROCESSING_CONFIG.arsApi.enabled = originalArsEnabled;
       VIDEO_PROCESSING_CONFIG.openSourceModel.enabled = originalOpenSourceEnabled;
     }
+  }
+});
+
+// 搜索工具
+ToolRegistry.registerTool({
+  id: 'search_sources',
+  name: 'Search Sources',
+  description: 'Search for relevant sources across multiple connectors including web, video, document, and forum sources.',
+  parameters: [
+    {
+      name: 'query',
+      type: 'string',
+      required: true,
+      description: 'Search query to find relevant sources'
+    },
+    {
+      name: 'connector_ids',
+      type: 'array',
+      required: false,
+      description: 'Specific connector IDs to search (e.g., ["web", "video", "document", "forum"])'
+    }
+  ],
+  validate(input) {
+    if (!input?.query || typeof input.query !== 'string') {
+      throw new Error('Query is required and must be a string');
+    }
+  },
+  async execute(input) {
+    const { query, connector_ids } = input;
+    return invokeSourceTool({
+      action: "discover",
+      query,
+      connector_ids
+    });
   }
 });
 

@@ -19,7 +19,20 @@ const toolLabels = {
   deep_read_page: "Deep Read",
   extract_video_intel: "Video Intel",
   run_ephemeral_tool: "Ephemeral Tool",
-  read_document_intel: "Document Intel"
+  read_document_intel: "Document Intel",
+  analyze_document_multimodal: "Multimodal Document Analysis"
+};
+
+const agentLabels = {
+  supervisor: "Supervisor",
+  web_researcher: "Web Researcher",
+  video_parser: "Video Parser",
+  long_text_collector: "Long Text Collector",
+  chart_parser: "Chart Parser",
+  table_parser: "Table Parser",
+  fact_verifier: "Fact Verifier",
+  synthesizer: "Synthesizer",
+  tool_creator: "Tool Creator"
 };
 
 function escapeHtml(value) {
@@ -41,6 +54,10 @@ function displaySourceType(value) {
 
 function displayTool(value) {
   return toolLabels[value] || value || "Unknown tool";
+}
+
+function displayAgent(value) {
+  return agentLabels[value] || value || "Unknown agent";
 }
 
 function displayConnector(value) {
@@ -209,6 +226,8 @@ function renderRounds(rounds) {
         <h4>Round ${round.round}</h4>
         <p><strong>Queries:</strong> ${(round.queries || []).map(escapeHtml).join(" / ")}</p>
         <p><strong>Sources:</strong> ${(round.selected_sources || []).map((item) => `${escapeHtml(item.title)} (${escapeHtml(displayConnector(item.connector))} / ${escapeHtml(displaySourceType(item.content_type || item.source_type))})`).join(" | ") || "none"}</p>
+        <p><strong>Collector layer:</strong> video ${escapeHtml(String(round.agent_reports?.collector_layer?.video_parser || 0))} | long text ${escapeHtml(String(round.agent_reports?.collector_layer?.long_text_collector || 0))} | chart ${escapeHtml(String(round.agent_reports?.collector_layer?.chart_parser || 0))} | table ${escapeHtml(String(round.agent_reports?.collector_layer?.table_parser || 0))}</p>
+        <p><strong>Routed tasks:</strong> ${(round.routed_tasks || []).map((item) => `${escapeHtml(displayAgent(item.agent))} -> ${escapeHtml(displayTool(item.tool))}`).join(" | ") || "none"}</p>
         <p><strong>Dynamic tools:</strong> ${(round.tool_attempts || []).map((item) => `${escapeHtml(item.strategy)} (${escapeHtml(item.success ? "success" : "failed")})`).join(" | ") || "none"}</p>
         <p><strong>Next step:</strong> ${escapeHtml(round.evaluation_snapshot?.next_best_action || "n/a")}</p>
       </div>
@@ -277,11 +296,12 @@ function renderAgentRuntime(runtime) {
   container.innerHTML = agents.map((agent) => `
     <article class="data-card">
       <div class="data-card-top">
-        <span class="pill">${escapeHtml(agent.id)}</span>
+        <span class="pill">${escapeHtml(displayAgent(agent.id))}</span>
         <span class="score">${escapeHtml(agent.status || "unknown")}</span>
       </div>
       <h4>${escapeHtml(agent.current_task_id || "No active task")}</h4>
       <ul class="tight-list">
+        <li>agent id ${escapeHtml(agent.id || "unknown")}</li>
         <li>completed ${escapeHtml(String(agent.completed_tasks || 0))}</li>
         <li>failed ${escapeHtml(String(agent.failed_tasks || 0))}</li>
         <li>inbox ${escapeHtml(String(agent.inbox_count || 0))} / outbox ${escapeHtml(String(agent.outbox_count || 0))}</li>

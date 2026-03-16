@@ -60,8 +60,10 @@ class AgentManager {
     // 简单的能力评估，基于Agent类型和状态
     const baseCapability = {
       web_researcher: 10,
-      deep_analyst: 8,
-      multimedia: 7,
+      long_text_collector: 8,
+      video_parser: 7,
+      chart_parser: 8,
+      table_parser: 8,
       fact_verifier: 9,
       synthesizer: 8
     };
@@ -136,12 +138,20 @@ class AgentManager {
       requirements.push({ type: 'web_researcher', priority: 'high' });
     }
     
-    if (task.type === 'analysis' || task.content.includes('analyze')) {
-      requirements.push({ type: 'deep_analyst', priority: 'high' });
+    if (task.type === 'analysis' || task.type === 'long_text' || task.content.includes('analyze')) {
+      requirements.push({ type: 'long_text_collector', priority: 'high' });
     }
     
-    if (task.type === 'multimedia' || task.content.includes('image') || task.content.includes('video')) {
-      requirements.push({ type: 'multimedia', priority: 'high' });
+    if (task.type === 'video_parse' || task.content.includes('video') || task.content.includes('transcript')) {
+      requirements.push({ type: 'video_parser', priority: 'high' });
+    }
+
+    if (task.type === 'chart_parse' || task.content.includes('chart') || task.content.includes('graph') || task.content.includes('image')) {
+      requirements.push({ type: 'chart_parser', priority: 'high' });
+    }
+
+    if (task.type === 'table_parse' || task.content.includes('table') || task.content.includes('spreadsheet') || task.content.includes('csv')) {
+      requirements.push({ type: 'table_parser', priority: 'high' });
     }
     
     if (task.type === 'verification' || task.content.includes('verify')) {
