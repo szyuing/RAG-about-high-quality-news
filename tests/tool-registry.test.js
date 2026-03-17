@@ -842,3 +842,96 @@ test("runSpecialistReads should split mixed documents into text, table, and visu
     ToolRegistry.executeTool = originalExecuteTool;
   }
 });
+
+// 测试新添加的工具
+test("GitHub Repo Info tool should be registered and testable", () => {
+  const capabilityIds = ToolRegistry.getToolCapabilities().map((item) => item.id);
+  assert.ok(capabilityIds.includes("fetch_github_repo"));
+
+  // 测试无效输入
+  const invalidInput = ToolRegistry.testTool("fetch_github_repo", {});
+  assert.equal(invalidInput.success, false);
+  assert.match(invalidInput.error, /Missing required parameter: repo/);
+
+  // 测试有效输入
+  const validInput = ToolRegistry.testTool("fetch_github_repo", {
+    repo: "octocat/Hello-World"
+  });
+  assert.equal(validInput.success, true);
+});
+
+test("API Test tool should be registered and testable", () => {
+  const capabilityIds = ToolRegistry.getToolCapabilities().map((item) => item.id);
+  assert.ok(capabilityIds.includes("test_api_endpoint"));
+
+  // 测试无效输入
+  const invalidInput = ToolRegistry.testTool("test_api_endpoint", {});
+  assert.equal(invalidInput.success, false);
+  assert.match(invalidInput.error, /Missing required parameter: endpoint/);
+
+  // 测试有效输入
+  const validInput = ToolRegistry.testTool("test_api_endpoint", {
+    endpoint: "https://api.github.com/repos/octocat/Hello-World"
+  });
+  assert.equal(validInput.success, true);
+});
+
+test("Data Converter tool should be registered and testable", () => {
+  const capabilityIds = ToolRegistry.getToolCapabilities().map((item) => item.id);
+  assert.ok(capabilityIds.includes("convert_data"));
+
+  // 测试无效输入
+  const invalidInput = ToolRegistry.testTool("convert_data", {});
+  assert.equal(invalidInput.success, false);
+  assert.match(invalidInput.error, /Missing required parameter: data/);
+
+  // 测试有效输入
+  const validInput = ToolRegistry.testTool("convert_data", {
+    data: { name: "test", value: 123 }
+  });
+  assert.equal(validInput.success, true);
+});
+
+test("Bilibili Audio Downloader tool should be registered and testable", () => {
+  const capabilityIds = ToolRegistry.getToolCapabilities().map((item) => item.id);
+  assert.ok(capabilityIds.includes("download_bilibili_audio"));
+
+  // 测试无效输入
+  const invalidInput = ToolRegistry.testTool("download_bilibili_audio", {});
+  assert.equal(invalidInput.success, false);
+  assert.match(invalidInput.error, /Missing required parameter: videoUrl/);
+
+  // 测试BV格式链接
+  const validBVInput = ToolRegistry.testTool("download_bilibili_audio", {
+    videoUrl: "https://www.bilibili.com/video/BV1xx411c7mD"
+  });
+  assert.equal(validBVInput.success, true);
+
+  // 测试av格式链接
+  const validAVInput = ToolRegistry.testTool("download_bilibili_audio", {
+    videoUrl: "https://www.bilibili.com/video/av170001"
+  });
+  assert.equal(validAVInput.success, true);
+});
+
+test("Douyin Video Downloader tool should be registered and testable", () => {
+  const capabilityIds = ToolRegistry.getToolCapabilities().map((item) => item.id);
+  assert.ok(capabilityIds.includes("download_douyin_video"));
+
+  // 测试无效输入
+  const invalidInput = ToolRegistry.testTool("download_douyin_video", {});
+  assert.equal(invalidInput.success, false);
+  assert.match(invalidInput.error, /Missing required parameter: videoUrl/);
+
+  // 测试短链接格式
+  const validShortUrlInput = ToolRegistry.testTool("download_douyin_video", {
+    videoUrl: "https://v.douyin.com/xxxxx"
+  });
+  assert.equal(validShortUrlInput.success, true);
+
+  // 测试完整链接格式
+  const validFullUrlInput = ToolRegistry.testTool("download_douyin_video", {
+    videoUrl: "https://www.douyin.com/video/1234567890"
+  });
+  assert.equal(validFullUrlInput.success, true);
+});

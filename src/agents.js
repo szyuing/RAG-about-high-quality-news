@@ -683,18 +683,25 @@ class FactVerifierAgent extends BaseAgent {
       `- ✅ **已确认**: ${verification.confirmations?.length || 0} 项`,
       `- ❌ **存在冲突**: ${verification.conflicts?.length || 0} 项`,
       `- ⚠️ **覆盖空白**: ${verification.coverage_gaps?.length || 0} 项`,
+      verification.review_summary?.overall_verdict ? `- 🧠 **LLM 结论**: ${verification.review_summary.overall_verdict}` : null,
+      verification.review_summary?.risk_level ? `- 📌 **风险等级**: ${verification.review_summary.risk_level}` : null,
       ""
-    ];
+    ].filter(Boolean);
+
+    if (verification.review_summary?.explanation) {
+      lines.push(`> ${verification.review_summary.explanation}`);
+      lines.push("");
+    }
 
     if (verification.confirmations && verification.confirmations.length > 0) {
       lines.push("## ✅ 已确认的事实");
       lines.push("");
       for (const item of verification.confirmations) {
-        lines.push(`### ${item.claim || "Unknown claim"}`);
+        lines.push(`### ${item.claim || item.preferred_fact?.claim || "Unknown claim"}`);
         lines.push(`- **来源**: ${item.sources?.join(", ") || "Unknown"}`);
-        lines.push(`- **确认程度**: ${(item.confidence * 100).toFixed(0)}%`);
-        if (item.explanation) {
-          lines.push(`- **说明**: ${item.explanation}`);
+        lines.push(`- **确认程度**: ${((Number(item.confidence) || 0) * 100).toFixed(0)}%`);
+        if (item.reason) {
+          lines.push(`- **说明**: ${item.reason}`);
         }
         lines.push("");
       }
@@ -704,11 +711,14 @@ class FactVerifierAgent extends BaseAgent {
       lines.push("## ❌ 存在冲突的事实");
       lines.push("");
       for (const item of verification.conflicts) {
-        lines.push(`### ${item.claim || "Unknown claim"}`);
-        lines.push(`- **冲突来源 1**: ${item.sources?.[0] || "Unknown"}`);
-        lines.push(`- **冲突来源 2**: ${item.sources?.[1] || "Unknown"}`);
-        if (item.explanation) {
-          lines.push(`- **说明**: ${item.explanation}`);
+        lines.push(`### ${item.claim || item.preferred_fact?.claim || "Unknown claim"}`);
+        lines.push(`- **当前更可信来源**: ${item.comparison?.preferred_source || item.sources?.[0] || "Unknown"}`);
+        lines.push(`- **冲突来源**: ${(item.sources || []).join(", ") || "Unknown"}`);
+        if (item.reason) {
+          lines.push(`- **说明**: ${item.reason}`);
+        }
+        if (item.missing_evidence?.length) {
+          lines.push(`- **仍缺证据**: ${item.missing_evidence.join("；")}`);
         }
         lines.push("");
       }
@@ -718,10 +728,22 @@ class FactVerifierAgent extends BaseAgent {
       lines.push("## ⚠️ 需要更多证据的领域");
       lines.push("");
       for (const item of verification.coverage_gaps) {
-        lines.push(`- **缺失领域**: ${item.claim || "Unknown"}`);
-        if (item.suggested_sources) {
+        lines.push(`- **缺失领域**: ${item.claim || item.preferred_fact?.claim || "Unknown"}`);
+        if (item.suggested_sources?.length) {
           lines.push(`- **建议来源**: ${item.suggested_sources.join(", ")}`);
         }
+        if (item.suggested_queries?.length) {
+          lines.push(`- **建议补搜**: ${item.suggested_queries.join(" | ")}`);
+        }
+      }
+      lines.push("");
+    }
+
+    if (verification.follow_up_queries?.length) {
+      lines.push("## 🔎 建议下一步搜索");
+      lines.push("");
+      for (const query of verification.follow_up_queries) {
+        lines.push(`- ${query}`);
       }
       lines.push("");
     }
@@ -736,7 +758,7 @@ class FactVerifierAgent extends BaseAgent {
     try {
       const { evidenceItems } = input;
 
-      const verification = verifyEvidenceUnits(evidenceItems || []);
+      const verification = await verifyEvidenceUnits(evidenceItems || []);
 
       this.result = {
         confirmations: verification.confirmations,

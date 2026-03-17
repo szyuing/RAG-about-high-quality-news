@@ -42,6 +42,9 @@ const experiencePath = resolveDataFile("experience-memory.json", "OPENSEARCH_EXP
 const knowledgeGraphPath = resolveDataFile("knowledge-graph.json", "OPENSEARCH_KNOWLEDGE_GRAPH_PATH");
 const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 const DEFAULT_PLANNER_MODEL = process.env.OPENAI_PLANNER_MODEL || "gpt-4o-mini";
+const DEFAULT_SYNTHESIS_MODEL = process.env.OPENAI_SYNTHESIS_MODEL || DEFAULT_PLANNER_MODEL;
+const ROUTABLE_AGENT_IDS = ["long_text_collector", "video_parser", "chart_parser", "fact_verifier"];
+const ROUTABLE_TOOL_IDS = ["deep_read_page", "extract_video_intel", "read_document_intel"];
 
 function normalizeText(value) {
   return String(value || "")
@@ -69,6 +72,47 @@ function dedupeBy(items, getKey) {
     }
   }
   return Array.from(map.values());
+}
+
+function compactStringList(values, { minLength = 1, limit = 6 } = {}) {
+  return Array.from(new Set((values || [])
+    .map((item) => String(item || "").trim())
+    .filter((item) => item.length >= minLength)))
+    .slice(0, limit);
+}
+
+function normalizeModelSelectedCandidateIds(candidateIds, fallbackIds = []) {
+  const selected = [];
+
+  for (const id of candidateIds || []) {
+    if (!id || selected.includes(id)) {
+      continue;
+    }
+    selected.push(id);
+    if (selected.length >= 4) {
+      break;
+    }
+  }
+
+  for (const id of fallbackIds || []) {
+    if (!id || selected.includes(id)) {
+      continue;
+    }
+    selected.push(id);
+    if (selected.length >= 4) {
+      break;
+    }
+  }
+
+  return selected.slice(0, 4);
+}
+
+function normalizeModelAgentId(agentId, fallbackAgent = "long_text_collector") {
+  return ROUTABLE_AGENT_IDS.includes(agentId) ? agentId : fallbackAgent;
+}
+
+function normalizeModelToolId(toolId, fallbackTool = "deep_read_page") {
+  return ROUTABLE_TOOL_IDS.includes(toolId) ? toolId : fallbackTool;
 }
 
 function readExperienceMemory() {
@@ -306,6 +350,24 @@ async function requestConnectorPlanFromModel(question, basePlan) {
     type: "object",
     additionalProperties: false,
     properties: {
+      sub_questions: {
+        type: "array",
+        minItems: 1,
+        maxItems: 5,
+        items: { type: "string" }
+      },
+      required_evidence: {
+        type: "array",
+        minItems: 1,
+        maxItems: 6,
+        items: { type: "string" }
+      },
+      initial_queries: {
+        type: "array",
+        minItems: 1,
+        maxItems: 6,
+        items: { type: "string" }
+      },
       chosen_connector_ids: {
         type: "array",
         minItems: 1,
@@ -332,12 +394,23 @@ async function requestConnectorPlanFromModel(question, basePlan) {
   };
 
   const prompt = [
-    "Select the best information source connectors for a research question.",
+    "You are the planning controller for a research agent.",
+    "Create a concise execution plan for the question.",
     "Choose only from the provided connectors.",
     "Pick 2 to 4 connectors that are most likely to produce strong evidence for the question.",
     "Prefer primary or official sources when relevant, but do not force diversity if the topic strongly points to a smaller set.",
+    "Return 2 to 5 sub-questions and 2 to 6 concrete initial queries.",
     "Question:",
     question,
+    "",
+    "Heuristic base plan:",
+    JSON.stringify({
+      sub_questions: basePlan.sub_questions,
+      required_evidence: basePlan.required_evidence,
+      initial_queries: basePlan.initial_queries,
+      preferred_connectors: basePlan.preferred_connectors,
+      stop_policy: basePlan.stop_policy
+    }, null, 2),
     "",
     "Available connectors:",
     JSON.stringify(connectors, null, 2)
@@ -382,6 +455,9 @@ function mergePlanWithModelSelection(basePlan, modelSelection) {
   const fallbackIds = basePlan.chosen_connector_ids || basePlan.preferred_connectors.map((item) => item.id);
   const chosenConnectorIds = normalizeModelConnectorIds(modelSelection?.chosen_connector_ids, fallbackIds);
   const reasonMap = new Map((modelSelection?.connector_reasons || []).map((item) => [item.id, item.reason]));
+  const subQuestions = compactStringList(modelSelection?.sub_questions, { minLength: 6, limit: 5 });
+  const requiredEvidence = compactStringList(modelSelection?.required_evidence, { minLength: 4, limit: 6 });
+  const initialQueries = compactStringList(modelSelection?.initial_queries, { minLength: 2, limit: 6 });
 
   const preferredConnectors = chosenConnectorIds
     .map((id) => {
@@ -399,6 +475,10 @@ function mergePlanWithModelSelection(basePlan, modelSelection) {
 
   return {
     ...basePlan,
+    sub_questions: subQuestions.length ? subQuestions : basePlan.sub_questions,
+    required_evidence: requiredEvidence.length ? requiredEvidence : basePlan.required_evidence,
+    initial_queries: initialQueries.length ? initialQueries : basePlan.initial_queries,
+    stop_policy: buildStopPolicy(basePlan.task_goal, subQuestions.length ? subQuestions : basePlan.sub_questions),
     preferred_connectors: preferredConnectors.length ? preferredConnectors : basePlan.preferred_connectors,
     chosen_connector_ids: chosenConnectorIds,
     planner_mode: "llm",
@@ -467,6 +547,149 @@ async function buildPlan(question) {
       ...basePlan,
       planner_mode: "fallback",
       planner_rationale: `fallback: ${error.message}`
+    };
+  }
+}
+
+async function requestCandidateRoutingFromModel(question, plan, candidates) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || !candidates.length) {
+    return null;
+  }
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      selected_candidates: {
+        type: "array",
+        minItems: 1,
+        maxItems: 4,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string", enum: candidates.map((item) => item.id) },
+            agent: { type: "string", enum: ROUTABLE_AGENT_IDS },
+            tool: { type: "string", enum: ROUTABLE_TOOL_IDS },
+            reason: { type: "string" }
+          },
+          required: ["id", "agent", "tool", "reason"]
+        }
+      },
+      rationale: { type: "string" }
+    },
+    required: ["selected_candidates", "rationale"]
+  };
+
+  const prompt = [
+    "You are the routing controller for a research agent.",
+    "Select up to 4 best candidate sources for the current round.",
+    "Assign exactly one agent and one tool to each selected source.",
+    "Prefer video_parser for video, chart_parser for chart-heavy documents, fact_verifier for forum-like discussions, and long_text_collector otherwise.",
+    "Question:",
+    question,
+    "",
+    "Plan summary:",
+    JSON.stringify({
+      sub_questions: plan.sub_questions,
+      required_evidence: plan.required_evidence,
+      chosen_connector_ids: plan.chosen_connector_ids
+    }, null, 2),
+    "",
+    "Available candidates:",
+    JSON.stringify(candidates.map((item) => ({
+      id: item.id,
+      title: item.title,
+      connector: item.connector,
+      content_type: item.content_type || item.source_type,
+      platform: item.platform,
+      score: item.score,
+      snippet: item.snippet,
+      url: item.url
+    })), null, 2)
+  ].join("\n");
+
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    signal: AbortSignal.timeout(20000),
+    body: JSON.stringify({
+      model: DEFAULT_PLANNER_MODEL,
+      store: false,
+      input: prompt,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "candidate_routing",
+          strict: true,
+          schema
+        }
+      }
+    })
+  });
+
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || `OpenAI routing planner failed with HTTP ${response.status}`);
+  }
+
+  const rawText = extractTextFromResponsePayload(payload);
+  if (!rawText) {
+    throw new Error("OpenAI routing planner returned no text output");
+  }
+
+  return JSON.parse(rawText);
+}
+
+async function selectCandidatesWithRouting(candidates, question, plan) {
+  const fallbackSelected = selectCandidates(candidates, question, plan);
+
+  try {
+    const routing = await requestCandidateRoutingFromModel(question, plan, candidates.slice(0, 10));
+    if (!routing?.selected_candidates?.length) {
+      return {
+        selected: fallbackSelected,
+        routing_mode: "heuristic",
+        routing_rationale: routing?.rationale || ""
+      };
+    }
+
+    const fallbackIds = fallbackSelected.map((item) => item.id);
+    const selectedIds = normalizeModelSelectedCandidateIds(
+      routing.selected_candidates.map((item) => item.id),
+      fallbackIds
+    );
+    const routeMap = new Map((routing.selected_candidates || []).map((item) => [item.id, item]));
+    const selected = selectedIds
+      .map((id) => {
+        const candidate = candidates.find((item) => item.id === id);
+        if (!candidate) {
+          return null;
+        }
+        const routed = routeMap.get(id);
+        return {
+          ...candidate,
+          preferred_agent: normalizeModelAgentId(routed?.agent, routeCandidate(candidate)),
+          preferred_tool: normalizeModelToolId(routed?.tool, collectorToolForCandidate(candidate)),
+          routing_reason: routed?.reason || null
+        };
+      })
+      .filter(Boolean);
+
+    return {
+      selected: selected.length ? selected : fallbackSelected,
+      routing_mode: selected.length ? "llm" : "heuristic",
+      routing_rationale: routing.rationale || ""
+    };
+  } catch (error) {
+    return {
+      selected: fallbackSelected,
+      routing_mode: "fallback",
+      routing_rationale: error.message
     };
   }
 }
@@ -761,7 +984,7 @@ async function attemptEphemeralFallbacks(question, failures, telemetry, onProgre
   };
 }
 
-function synthesize(question, mode, candidates, reads, evidenceItems, verification, evaluation, telemetry) {
+function buildHeuristicSynthesis(question, mode, candidates, reads, evidenceItems, verification, evaluation, telemetry) {
   const keyClaims = dedupeBy(
     evidenceItems.flatMap((item) => item.claims || []),
     (claim) => `${claim.subject || "claim"}:${claim.type || "statement"}:${claim.claim}`
@@ -810,6 +1033,8 @@ function synthesize(question, mode, candidates, reads, evidenceItems, verificati
       evaluation_scorecard: evaluation.scorecard || null,
       stop_state: evaluation.stop_state || null,
       stop_decision: evaluation.llm_stop_decision || null,
+      recommended_follow_ups: evaluation.follow_up_queries || [],
+      suggested_connectors: evaluation.suggested_connector_ids || [],
       confidence: (() => {
         const baseScore = evaluation.is_sufficient ? 0.58 : 0.38;
         const diversityBonus = Math.min(0.15, ((evaluation.metrics?.source_types_covered || 0) / 4) * 0.15);
@@ -839,6 +1064,158 @@ function synthesize(question, mode, candidates, reads, evidenceItems, verificati
       }
     }
   };
+}
+
+async function requestFinalSynthesisFromModel(question, mode, evidenceItems, verification, evaluation) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || !evidenceItems.length) {
+    return null;
+  }
+
+  const evidenceDigest = evidenceItems.slice(0, 6).map((item) => ({
+    source_id: item.source_id,
+    title: item.title,
+    source_type: item.source_type,
+    key_points: (item.key_points || []).slice(0, 3),
+    claims: (item.claims || []).slice(0, 3).map((claim) => ({
+      claim: claim.claim,
+      subject: claim.subject,
+      value: claim.value,
+      unit: claim.unit
+    })),
+    quotes: (item.quotes || []).slice(0, 2).map((quote) => quote.text)
+  }));
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      quick_answer: { type: "string" },
+      conclusion: { type: "string" },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+      key_claims: {
+        type: "array",
+        maxItems: 5,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            claim: { type: "string" },
+            source_id: { type: "string" }
+          },
+          required: ["claim", "source_id"]
+        }
+      },
+      uncertainty: {
+        type: "array",
+        maxItems: 5,
+        items: { type: "string" }
+      }
+    },
+    required: ["quick_answer", "conclusion", "confidence", "key_claims", "uncertainty"]
+  };
+
+  const prompt = [
+    "You are the answer-composer for a research agent.",
+    "Write a grounded answer using only the supplied evidence digest.",
+    "Keep the quick answer concise and actionable.",
+    "If evidence is incomplete or conflicted, make the uncertainty explicit.",
+    "Question:",
+    question,
+    "",
+    "Mode:",
+    mode,
+    "",
+    "Evidence digest:",
+    JSON.stringify({
+      evidence: evidenceDigest,
+      verification: {
+        confirmations: verification.confirmations,
+        conflicts: verification.conflicts,
+        coverage_gaps: verification.coverage_gaps
+      },
+      evaluation: {
+        is_sufficient: evaluation.is_sufficient,
+        risk_notes: evaluation.risk_notes,
+        follow_up_queries: evaluation.follow_up_queries,
+        metrics: evaluation.metrics
+      }
+    }, null, 2)
+  ].join("\n");
+
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`
+    },
+    signal: AbortSignal.timeout(25000),
+    body: JSON.stringify({
+      model: DEFAULT_SYNTHESIS_MODEL,
+      store: false,
+      input: prompt,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "final_synthesis",
+          strict: true,
+          schema
+        }
+      }
+    })
+  });
+
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || `OpenAI synthesis failed with HTTP ${response.status}`);
+  }
+
+  const rawText = extractTextFromResponsePayload(payload);
+  if (!rawText) {
+    throw new Error("OpenAI synthesis returned no text output");
+  }
+
+  return JSON.parse(rawText);
+}
+
+async function synthesize(question, mode, candidates, reads, evidenceItems, verification, evaluation, telemetry) {
+  const fallback = buildHeuristicSynthesis(question, mode, candidates, reads, evidenceItems, verification, evaluation, telemetry);
+
+  try {
+    const modelAnswer = await requestFinalSynthesisFromModel(question, mode, evidenceItems, verification, evaluation);
+    if (!modelAnswer) {
+      return fallback;
+    }
+
+    return {
+      ...fallback,
+      quick_answer: modelAnswer.quick_answer,
+      deep_research_summary: {
+        ...fallback.deep_research_summary,
+        conclusion: modelAnswer.conclusion,
+        uncertainty: compactStringList(modelAnswer.uncertainty, { minLength: 4, limit: 5 }),
+        confidence: Number(modelAnswer.confidence.toFixed(2)),
+        llm_composer: {
+          model: DEFAULT_SYNTHESIS_MODEL,
+          key_claims: (modelAnswer.key_claims || []).map((item) => ({
+            claim: item.claim,
+            source_id: item.source_id
+          }))
+        }
+      }
+    };
+  } catch (error) {
+    return {
+      ...fallback,
+      deep_research_summary: {
+        ...fallback.deep_research_summary,
+        llm_composer: {
+          model: DEFAULT_SYNTHESIS_MODEL,
+          fallback_reason: error.message
+        }
+      }
+    };
+  }
 }
 
 function summarizeExperience(question, scratchpad, plan, evaluation, telemetry) {
@@ -943,6 +1320,13 @@ function summarizeExperience(question, scratchpad, plan, evaluation, telemetry) 
 }
 
 function buildFollowUpQueries(question, evaluation, scratchpad, experienceHints = getRelevantExperienceHints(question)) {
+  if (evaluation?.follow_up_queries?.length) {
+    return evaluation.follow_up_queries
+      .filter(Boolean)
+      .filter((item, index, list) => list.indexOf(item) === index)
+      .slice(0, 4);
+  }
+
   if (!evaluation?.missing_questions?.length) {
     return [];
   }
@@ -964,6 +1348,15 @@ function buildFollowUpQueries(question, evaluation, scratchpad, experienceHints 
     .filter(Boolean)
     .filter((item, index, list) => list.indexOf(item) === index)
     .slice(0, 3);
+}
+
+function buildNextRoundConnectorIds(plan, currentConnectorIds, evaluation) {
+  const fallbackIds = compactStringList(
+    currentConnectorIds?.length ? currentConnectorIds : (plan?.chosen_connector_ids || []),
+    { limit: 4 }
+  );
+  const suggestedIds = compactStringList(evaluation?.suggested_connector_ids || [], { limit: 4 });
+  return normalizeModelConnectorIds(suggestedIds, fallbackIds);
 }
 
 async function emitProgress(onProgress, payload) {
@@ -1016,19 +1409,27 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
     }
   }
 
-  const selected = selectCandidates(candidates, question, plan);
+  const routedSelection = await selectCandidatesWithRouting(candidates, question, plan);
+  const selected = routedSelection.selected;
+  recordDecision(scratchpad, {
+    type: "routing",
+    mode: routedSelection.routing_mode,
+    rationale: routedSelection.routing_rationale,
+    selected_source_ids: selected.map((item) => item.id)
+  });
   const specialistReads = await runSpecialistReads(selected, telemetry, runtime);
   const routedTasks = specialistReads.routed_tasks?.length
     ? specialistReads.routed_tasks
     : selected.map((candidate) => {
-        const agent = routeCandidate(candidate);
-        const tool = collectorToolForCandidate(candidate);
+        const agent = candidate.preferred_agent || routeCandidate(candidate);
+        const tool = candidate.preferred_tool || collectorToolForCandidate(candidate);
         return {
           source_id: candidate.id,
           segment_source_id: candidate.id,
           agent,
           tool,
-          connector: candidate.connector
+          connector: candidate.connector,
+          objective: candidate.routing_reason || null
         };
       });
   const reads = specialistReads.results.map((item) => item.read);
@@ -1066,12 +1467,12 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
       content_type: contentType,
       source_type: contentType,
       connector: candidate.connector,
-      parser_agent: read.parser_agent || routeCandidate(candidate),
+      parser_agent: read.parser_agent || candidate.preferred_agent || routeCandidate(candidate),
       tool: read.tool,
       pages: read.segment_pages || null
     };
     scratchpad.sources_read.push(sourceRecord);
-    recordAgentArtifact(scratchpad, read.parser_agent || routeCandidate(candidate), {
+    recordAgentArtifact(scratchpad, read.parser_agent || candidate.preferred_agent || routeCandidate(candidate), {
       type: "source_read",
       source_id: read.source_id,
       parent_source_id: candidate.id,
@@ -1147,6 +1548,7 @@ async function runResearch({ question, mode, onProgress }) {
   let verification = { confirmations: [], conflicts: [], coverage_gaps: [] };
   let verifierReview = { tasks: [], summary: { conflicts: 0, coverage_gaps: 0, review_count: 0 } };
   let evaluation = null;
+  let activeConnectorIds = normalizeModelConnectorIds(plan.chosen_connector_ids, plan.chosen_connector_ids);
 
   const maxRounds = Math.max(1, plan.stop_policy?.max_rounds || 2);
   for (let index = 0; index < maxRounds; index += 1) {
@@ -1155,7 +1557,12 @@ async function runResearch({ question, mode, onProgress }) {
       break;
     }
 
-    const round = await runRound(plan, question, queries, scratchpad, telemetry, onProgress);
+    const roundConnectorIds = [...activeConnectorIds];
+    const roundPlan = {
+      ...plan,
+      chosen_connector_ids: roundConnectorIds
+    };
+    const round = await runRound(roundPlan, question, queries, scratchpad, telemetry, onProgress);
     combinedCandidates = dedupeBy([...combinedCandidates, ...round.candidates], (item) => item.url).sort((left, right) => right.score - left.score);
     combinedReads = dedupeBy([...combinedReads, ...round.reads], (item) => item.source_id);
     combinedEvidence = dedupeBy([...combinedEvidence, ...round.evidence_items], (item) => item.source_id);
@@ -1230,7 +1637,7 @@ async function runResearch({ question, mode, onProgress }) {
     const roundSummary = {
       round: index + 1,
       queries,
-      chosen_connector_ids: plan.chosen_connector_ids,
+      chosen_connector_ids: roundConnectorIds,
       candidates_returned: round.candidates.length,
       selected_sources: round.selected.map((item) => ({
         id: item.id,
@@ -1275,6 +1682,19 @@ async function runResearch({ question, mode, onProgress }) {
       telemetry.stop_reason = evaluation.stop_state.reason;
       break;
     }
+
+    if (evaluation.next_best_action === "run_follow_up_search") {
+      const nextConnectorIds = buildNextRoundConnectorIds(plan, roundConnectorIds, evaluation);
+      if (nextConnectorIds.join("|") !== roundConnectorIds.join("|")) {
+        recordDecision(scratchpad, {
+          type: "connector_selection",
+          round: index + 1,
+          chosen_connector_ids: nextConnectorIds,
+          rationale: "merged with evaluator suggested_connector_ids"
+        });
+      }
+      activeConnectorIds = nextConnectorIds;
+    }
   }
 
   if (!evaluation) {
@@ -1298,7 +1718,11 @@ async function runResearch({ question, mode, onProgress }) {
     type: "stop_reason",
     value: telemetry.stop_reason
   });
-  for (const connectorId of plan.chosen_connector_ids) {
+  const connectorIdsForHealth = Array.from(new Set([
+    ...(plan.chosen_connector_ids || []),
+    ...rounds.flatMap((item) => item.chosen_connector_ids || [])
+  ]));
+  for (const connectorId of connectorIdsForHealth) {
     const failures = telemetry.failures.filter((item) => item.connector === connectorId || item.stage === "discover");
     telemetry.connector_health[connectorId] = {
       failed_events: failures.length,
@@ -1327,9 +1751,9 @@ async function runResearch({ question, mode, onProgress }) {
       rounds: rounds.length
     }
   });
-  const finalAnswer = synthesize(question, mode, combinedCandidates, combinedReads, combinedEvidence, verification, evaluation, telemetry);
+  const finalAnswer = await synthesize(question, mode, combinedCandidates, combinedReads, combinedEvidence, verification, evaluation, telemetry);
   completeAgentTask(agentRuntime, synthesisTask.id, {
-    confidence: finalAnswer?.summary?.confidence || null,
+    confidence: finalAnswer?.deep_research_summary?.confidence || null,
     answer_sections: Object.keys(finalAnswer || {})
   });
   const knowledgeGraphExport = knowledgeGraph.export();
@@ -1378,10 +1802,15 @@ module.exports = {
     buildStopPolicy,
     extractTextFromResponsePayload,
     normalizeModelConnectorIds,
+    normalizeModelSelectedCandidateIds,
     mergePlanWithModelSelection,
     buildPlan,
     planner,
     getRelevantExperienceHints,
+    requestCandidateRoutingFromModel,
+    selectCandidatesWithRouting,
+    requestFinalSynthesisFromModel,
+    synthesize,
     buildEvidenceItems,
     buildEvaluationScorecard,
     buildStopDecisionContext,
@@ -1392,6 +1821,8 @@ module.exports = {
     buildEmptyEvaluation,
     crossCheckFacts,
     evaluator,
+    buildFollowUpQueries,
+    buildNextRoundConnectorIds,
     routeCandidate,
     createScratchpad,
     updateQuestionStatus

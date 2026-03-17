@@ -1,4 +1,4 @@
-const crypto = require("crypto");
+﻿const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -6,16 +6,16 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { verifyEvidenceUnits } = require("./fact-verifier");
 const { extractTextFromResponsePayload } = require("./openai-response");
+const { registerProductivityTools } = require("./productivity-tools");
+const { createToolRegistry } = require("./tool-registry-core");
 
-// 视频转MP3和文本提取配置
+// Video processing configuration
 const VIDEO_PROCESSING_CONFIG = {
-  // ARS API配置
   arsApi: {
     enabled: process.env.ARS_API_ENABLED === "true",
     endpoint: process.env.ARS_API_ENDPOINT || "https://api.ars.example.com/transcribe",
     apiKey: process.env.ARS_API_KEY || ""
   },
-  // 开源模型配置
   openSourceModel: {
     enabled: process.env.OPEN_SOURCE_MODEL_ENABLED === "true",
     endpoint: process.env.OPEN_SOURCE_MODEL_ENDPOINT || "http://localhost:8000/transcribe",
@@ -24,9 +24,9 @@ const VIDEO_PROCESSING_CONFIG = {
 };
 
 const samplePrompts = [
-  "Sora 模型现在的生成时长上限是多少？相比刚发布时有哪些技术架构上的更新？",
-  "苹果 2024 年发布的手机比 2023 年的在性能上提升了多少？",
-  "为什么这个产品强调先规划再搜索，而不是直接搜？"
+  "What is OpenAI Sora's current generation limit, and how has it changed since launch?",
+  "How much performance improvement does Apple's 2024 flagship phone have over the 2023 model?",
+  "Why does this product emphasize planning before search instead of searching immediately?"
 ];
 
 let sourceCatalog = [];
@@ -142,307 +142,1418 @@ function scoreToolForTask(tool, task = {}) {
   return score;
 }
 
-// 标准化工具接口
-const ToolRegistry = {
-  tools: new Map(),
-  toolVersions: new Map(),
-  toolAliases: new Map(),
-  lifecycleEvents: [],
-  
-  registerTool(toolDefinition) {
-    if (!toolDefinition.id) {
-      throw new Error('Tool must have an id');
-    }
-    if (!toolDefinition.name) {
-      throw new Error('Tool must have a name');
-    }
-    if (!toolDefinition.execute) {
-      throw new Error('Tool must have an execute function');
+// 鏁版嵁杞崲宸ュ叿
+async function convertData(data, options = {}) {
+  const {
+    fromFormat = 'json',
+    toFormat = 'json',
+    filter = null,
+    map = null,
+    sortBy = null,
+    limit = null
+  } = options;
+
+  try {
+    // 瑙ｆ瀽杈撳叆鏁版嵁
+    let parsedData = data;
+    if (fromFormat === 'csv' && typeof data === 'string') {
+      // CSV 杞?JSON
+      const lines = data.trim().split('\n');
+      const headers = lines[0].split(',');
+      parsedData = lines.slice(1).map(line => {
+        const values = line.split(',');
+        return headers.reduce((obj, header, index) => {
+          obj[header.trim()] = values[index] ? values[index].trim() : '';
+          return obj;
+        }, {});
+      });
+    } else if (fromFormat === 'json' && typeof data === 'string') {
+      // 瑙ｆ瀽 JSON 瀛楃涓?      parsedData = JSON.parse(data);
     }
 
-    const baseToolId = toolDefinition.base_tool_id || toolDefinition.id;
-    const version = String(toolDefinition.version || "1.0.0");
-    const registeredAt = new Date().toISOString();
-    const existingActive = this.tools.get(toolDefinition.id);
-    const normalized = {
-      id: toolDefinition.id,
-      name: toolDefinition.name,
-      description: toolDefinition.description || '',
-      parameters: toolDefinition.parameters || [],
-      execute: toolDefinition.execute,
-      validate: toolDefinition.validate || null,
-      inputSchema: toolDefinition.inputSchema || null,
-      outputSchema: toolDefinition.outputSchema || null,
-      base_tool_id: baseToolId,
-      version,
-      status: toolDefinition.status || "active",
-      source: toolDefinition.source || "builtin",
-      created_by: toolDefinition.created_by || null,
-      created_for: toolDefinition.created_for || null,
-      promoted_to_builtin: Boolean(toolDefinition.promoted_to_builtin),
-      replaced_by: null,
-      supersedes: toolDefinition.supersedes || existingActive?.id || null,
-      request_id: toolDefinition.request_id || null,
-      registered_at: registeredAt,
-      runtime: toolDefinition.runtime || "node",
-      site_scope: toolDefinition.site_scope || null,
-      safety_level: toolDefinition.safety_level || "restricted",
-      implementation_plan: toolDefinition.implementation_plan || null,
-      lifecycle_state: toolDefinition.lifecycle_state || (toolDefinition.status === "candidate" ? "candidate" : (toolDefinition.status === "ephemeral" ? "ephemeral" : "registered")),
-      verifier_verdict: toolDefinition.verifier_verdict || null,
-      last_verified_at: toolDefinition.last_verified_at || null,
-      code_hash: toolDefinition.code_hash || null,
-      spec_hash: toolDefinition.spec_hash || null
-    };
+    // 搴旂敤杩囨护
+    if (filter && typeof filter === 'object') {
+      if (Array.isArray(parsedData)) {
+        parsedData = parsedData.filter(item => {
+          return Object.entries(filter).every(([key, value]) => {
+            return item[key] === value;
+          });
+        });
+      }
+    }
 
-    if (existingActive && existingActive.id !== normalized.id) {
-      existingActive.status = "superseded";
-      existingActive.replaced_by = normalized.id;
-      this.lifecycleEvents.push({
-        type: "superseded",
-        tool_id: existingActive.id,
-        base_tool_id: baseToolId,
-        replaced_by: normalized.id,
-        at: registeredAt
+    // 搴旂敤鏄犲皠
+    if (map && typeof map === 'object') {
+      if (Array.isArray(parsedData)) {
+        parsedData = parsedData.map(item => {
+          const newItem = {};
+          Object.entries(map).forEach(([key, value]) => {
+            newItem[value] = item[key];
+          });
+          return newItem;
+        });
+      } else if (typeof parsedData === 'object') {
+        const newItem = {};
+        Object.entries(map).forEach(([key, value]) => {
+          newItem[value] = parsedData[key];
+        });
+        parsedData = newItem;
+      }
+    }
+
+    // 搴旂敤鎺掑簭
+    if (sortBy && Array.isArray(parsedData)) {
+      parsedData.sort((a, b) => {
+        if (a[sortBy] < b[sortBy]) return -1;
+        if (a[sortBy] > b[sortBy]) return 1;
+        return 0;
       });
     }
 
-    this.tools.set(toolDefinition.id, normalized);
-    this.toolAliases.set(baseToolId, toolDefinition.id);
-
-    const history = this.toolVersions.get(baseToolId) || [];
-    history.push(normalized);
-    this.toolVersions.set(baseToolId, history);
-    this.lifecycleEvents.push({
-      type: "registered",
-      tool_id: normalized.id,
-      base_tool_id: baseToolId,
-      version,
-      at: registeredAt
-    });
-  },
-  
-  getTool(toolId) {
-    const resolvedId = this.toolAliases.get(toolId) || toolId;
-    return this.tools.get(resolvedId);
-  },
-  
-  getTools() {
-    return Array.from(this.tools.values());
-  },
-
-  getToolHistory(toolId) {
-    const current = this.getTool(toolId);
-    const baseToolId = current?.base_tool_id || toolId;
-    return (this.toolVersions.get(baseToolId) || []).map((item) => ({ ...item }));
-  },
-
-  deprecateTool(toolId, reason = "deprecated") {
-    const tool = this.getTool(toolId);
-    if (!tool) {
-      throw new Error(`Tool not found: ${toolId}`);
-    }
-    tool.status = "deprecated";
-    tool.deprecated_at = new Date().toISOString();
-    tool.deprecation_reason = reason;
-    this.lifecycleEvents.push({
-      type: "deprecated",
-      tool_id: tool.id,
-      base_tool_id: tool.base_tool_id,
-      reason,
-      at: tool.deprecated_at
-    });
-    return { ...tool };
-  },
-
-  rollbackTool(toolId, targetToolId = null) {
-    const current = this.getTool(toolId);
-    if (!current) {
-      throw new Error(`Tool not found: ${toolId}`);
+    // 搴旂敤闄愬埗
+    if (limit && Array.isArray(parsedData)) {
+      parsedData = parsedData.slice(0, limit);
     }
 
-    const history = this.toolVersions.get(current.base_tool_id) || [];
-    const target = targetToolId
-      ? history.find((item) => item.id === targetToolId)
-      : [...history].reverse().find((item) => item.id !== current.id && item.status !== "deprecated");
-
-    if (!target) {
-      throw new Error(`No rollback target found for ${toolId}`);
-    }
-
-    current.status = "superseded";
-    current.replaced_by = target.id;
-    target.status = "active";
-    target.reactivated_at = new Date().toISOString();
-    this.toolAliases.set(current.base_tool_id, target.id);
-    this.lifecycleEvents.push({
-      type: "rolled_back",
-      tool_id: current.id,
-      base_tool_id: current.base_tool_id,
-      target_tool_id: target.id,
-      at: target.reactivated_at
-    });
-    return { active: { ...target }, previous: { ...current } };
-  },
-
-  promoteTool(toolId, reason = "promoted_to_builtin_candidate") {
-    const tool = this.getTool(toolId);
-    if (!tool) {
-      throw new Error(`Tool not found: ${toolId}`);
-    }
-    tool.promoted_to_builtin = true;
-    tool.promotion_reason = reason;
-    tool.promoted_at = new Date().toISOString();
-    this.lifecycleEvents.push({
-      type: "promoted",
-      tool_id: tool.id,
-      base_tool_id: tool.base_tool_id,
-      reason,
-      at: tool.promoted_at
-    });
-    return { ...tool };
-  },
-
-  getLifecycleEvents(toolId = null) {
-    if (!toolId) {
-      return this.lifecycleEvents.map((item) => ({ ...item }));
-    }
-    const current = this.getTool(toolId);
-    const baseToolId = current?.base_tool_id || toolId;
-    return this.lifecycleEvents
-      .filter((item) => item.base_tool_id === baseToolId || item.tool_id === toolId)
-      .map((item) => ({ ...item }));
-  },
-
-  resolveToolForTask(task = {}) {
-    const preferredToolId = task.preferred_tool_id || task.preferredToolId || null;
-    const preferredTool = preferredToolId ? this.getTool(preferredToolId) : null;
-    if (preferredTool && preferredTool.status !== "deprecated") {
-      return {
-        tool_id: preferredTool.id,
-        capability: normalizeCapability(task.capability),
-        reason: preferredToolId === task.capability
-          ? "matched_requested_tool_id"
-          : "matched_preferred_tool",
-        tool: { ...preferredTool }
-      };
-    }
-
-    const ranked = this.getTools()
-      .map((tool) => ({
-        tool,
-        score: scoreToolForTask(tool, task)
-      }))
-      .filter((item) => item.score >= 0)
-      .sort((left, right) => right.score - left.score);
-
-    const best = ranked[0];
-    if (!best || best.score <= 0) {
-      return null;
+    // Convert into target format
+    let result;
+    if (toFormat === 'csv' && Array.isArray(parsedData)) {
+      // JSON 杞?CSV
+      if (parsedData.length === 0) {
+        result = '';
+      } else {
+        const headers = Object.keys(parsedData[0]);
+        const rows = [
+          headers.join(','),
+          ...parsedData.map(item => {
+            return headers.map(header => {
+              const value = item[header];
+              return typeof value === 'string' && value.includes(',') ? `"${value}"` : value;
+            }).join(',');
+          })
+        ];
+        result = rows.join('\n');
+      }
+    } else if (toFormat === 'json') {
+      // 杈撳嚭 JSON
+      result = typeof parsedData === 'string' ? parsedData : JSON.stringify(parsedData, null, 2);
+    } else {
+      // 鐩存帴杩斿洖鏁版嵁
+      result = parsedData;
     }
 
     return {
-      tool_id: best.tool.id,
-      capability: normalizeCapability(task.capability),
-      reason: "matched_tool_capability",
-      tool: { ...best.tool },
-      alternatives: ranked.slice(1, 3).map((item) => ({
-        tool_id: item.tool.id,
-        score: item.score
-      }))
+      success: true,
+      data: result
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// API 娴嬭瘯宸ュ叿
+async function testApiEndpoint(endpoint, options = {}) {
+  const {
+    method = 'GET',
+    headers = {},
+    body = null,
+    timeout = 10000,
+    expectedStatus = 200,
+    auth = null
+  } = options;
+
+  try {
+    const fetchOptions = {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...headers
+      },
+      signal: AbortSignal.timeout(timeout)
+    };
+
+    if (auth) {
+      if (auth.type === 'basic') {
+        const credentials = Buffer.from(`${auth.username}:${auth.password}`).toString('base64');
+        fetchOptions.headers['Authorization'] = `Basic ${credentials}`;
+      } else if (auth.type === 'bearer') {
+        fetchOptions.headers['Authorization'] = `Bearer ${auth.token}`;
+      }
+    }
+
+    if (body && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+      fetchOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
+    }
+
+    const startTime = Date.now();
+    const response = await fetch(endpoint, fetchOptions);
+    const endTime = Date.now();
+    const responseTime = endTime - startTime;
+
+    let responseBody;
+    try {
+      responseBody = await response.json();
+    } catch (error) {
+      responseBody = await response.text();
+    }
+
+    const success = response.status === expectedStatus;
+
+    return {
+      success,
+      data: {
+        endpoint,
+        method,
+        status: response.status,
+        statusText: response.statusText,
+        responseTime,
+        headers: Object.fromEntries(response.headers),
+        body: responseBody,
+        expectedStatus,
+        passed: success
+      }
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// GitHub API 宸ュ叿
+async function fetchGitHubRepoInfo(repo) {
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) {
+    throw new Error('Invalid GitHub repo format. Use owner/repo');
+  }
+
+  const apiUrl = `https://api.github.com/repos/${owner}/${repoName}`;
+  const readmeUrl = `https://api.github.com/repos/${owner}/${repoName}/readme`;
+  const contentsUrl = `https://api.github.com/repos/${owner}/${repoName}/contents`;
+
+  try {
+    // 鑾峰彇浠撳簱鍩烘湰淇℃伅
+    const repoResponse = await fetch(apiUrl, {
+      headers: {
+        'User-Agent': 'OpenSearch-Tool'
+      }
+    });
+    if (!repoResponse.ok) {
+      throw new Error(`GitHub API error: ${repoResponse.status}`);
+    }
+    const repoInfo = await repoResponse.json();
+
+    // 鑾峰彇README
+    let readmeContent = '';
+    try {
+      const readmeResponse = await fetch(readmeUrl, {
+        headers: {
+          'User-Agent': 'OpenSearch-Tool'
+        }
+      });
+      if (readmeResponse.ok) {
+        const readmeData = await readmeResponse.json();
+        readmeContent = Buffer.from(readmeData.content, 'base64').toString('utf8');
+      }
+    } catch (readmeError) {
+      // Ignore README fetch failures
+    }
+
+    // 鑾峰彇鏂囦欢缁撴瀯
+    let fileStructure = [];
+    try {
+      const contentsResponse = await fetch(contentsUrl, {
+        headers: {
+          'User-Agent': 'OpenSearch-Tool'
+        }
+      });
+      if (contentsResponse.ok) {
+        const contents = await contentsResponse.json();
+        fileStructure = contents.map(item => ({
+          name: item.name,
+          type: item.type,
+          path: item.path,
+          size: item.size
+        }));
+      }
+    } catch (contentsError) {
+      // Ignore file structure fetch failures
+    }
+
+    return {
+      success: true,
+      data: {
+        name: repoInfo.name,
+        full_name: repoInfo.full_name,
+        description: repoInfo.description,
+        stargazers_count: repoInfo.stargazers_count,
+        forks_count: repoInfo.forks_count,
+        open_issues_count: repoInfo.open_issues_count,
+        created_at: repoInfo.created_at,
+        updated_at: repoInfo.updated_at,
+        html_url: repoInfo.html_url,
+        owner: repoInfo.owner,
+        readme: readmeContent,
+        file_structure: fileStructure
+      }
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+const ToolRegistry = createToolRegistry({
+  normalizeCapability,
+  scoreToolForTask
+});
+
+// 娉ㄥ唽鍐呯疆宸ュ叿
+ToolRegistry.registerTool({
+  id: 'fetch_github_repo',
+  name: 'GitHub Repo Info',
+  description: 'Fetch GitHub repository metadata, README content, and file structure',
+  parameters: [
+    {
+      name: 'repo',
+      type: 'string',
+      required: true,
+      description: 'GitHub浠撳簱璺緞锛屾牸寮忎负 owner/repo'
+    }
+  ],
+  execute: async (input) => {
+    const { repo } = input;
+    if (!repo) {
+      throw new Error('Missing required parameter: repo');
+    }
+    const result = await fetchGitHubRepoInfo(repo);
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result.data;
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+ToolRegistry.registerTool({
+  id: 'analyze_document_multimodal',
+  name: 'Analyze Document Multimodal',
+  description: 'Analyze a document with multimodal signals, including text and images',
+  parameters: [
+    {
+      name: 'url',
+      type: 'string',
+      required: true,
+      description: '鏂囨。URL'
+    },
+    {
+      name: 'markdown',
+      type: 'string',
+      required: false,
+      description: '鏂囨。鍐呭'
+    },
+    {
+      name: 'page_images',
+      type: 'array',
+      required: false,
+      description: '椤甸潰鍥惧儚URL鍒楄〃'
+    }
+  ],
+  execute: async (input) => {
+    return await analyzeDocumentWithMultimodalModel(input);
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+ToolRegistry.registerTool({
+  id: 'layout_analysis',
+  name: 'Document Layout Analysis',
+  description: '鍒嗘瀽鏂囨。甯冨眬锛岃瘑鍒枃鏈€佽〃鏍煎拰瑙嗚鍏冪礌',
+  parameters: [
+    {
+      name: 'candidate',
+      type: 'object',
+      required: true,
+      description: 'Document candidate descriptor'
+    }
+  ],
+  execute: async (input) => {
+    const { candidate } = input;
+    const read = await readDocumentSource(candidate);
+    const fallbackLayout = deriveDocumentLayout(read, candidate);
+    const llmLayout = await analyzeDocumentLayoutWithModel(candidate, read, fallbackLayout);
+    return {
+      layout: llmLayout || fallbackLayout,
+      layout_analysis_mode: llmLayout ? 'llm' : 'heuristic'
     };
   },
-  
-  async executeTool(toolId, input) {
-    const tool = this.getTool(toolId);
-    if (!tool) {
-      throw new Error(`Tool not found: ${toolId}`);
+  source: 'builtin',
+  status: 'active'
+});
+
+ToolRegistry.registerTool({
+  id: 'read_document_intel',
+  name: 'Read Document Intel',
+  description: 'Read document content from URL or candidate metadata.',
+  parameters: [
+    {
+      name: 'url',
+      type: 'string',
+      required: false,
+      description: '鏂囨。URL'
+    },
+    {
+      name: 'title',
+      type: 'string',
+      required: false,
+      description: '鏂囨。鏍囬'
+    },
+    {
+      name: 'candidate',
+      type: 'object',
+      required: false,
+      description: 'Document candidate object'
     }
-    
-    try {
-      if (tool.status === "deprecated") {
-        throw new Error(`Tool is deprecated: ${tool.id}`);
-      }
-      this.validateToolInput(toolId, input);
-      const result = await tool.execute(input);
-      return {
-        success: true,
-        data: result,
-        toolId,
-        timestamp: new Date().toISOString()
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: {
-          message: error.message,
-          stack: error.stack
-        },
-        toolId,
-        timestamp: new Date().toISOString()
-      };
+  ],
+  execute: async (input) => {
+    const { candidate, url, title } = input;
+    if (candidate) {
+      return await readDocumentSource(candidate);
     }
+    if (url) {
+      return await readDocumentSource({ url, title, content_type: 'document', source_type: 'document' });
+    }
+    throw new Error('Either candidate or url is required');
   },
-  
-  validateToolInput(toolId, input) {
-    const tool = this.getTool(toolId);
-    if (!tool) {
-      throw new Error(`Tool not found: ${toolId}`);
+  source: 'builtin',
+  status: 'active'
+});
+
+ToolRegistry.registerTool({
+  id: 'deep_read_page',
+  name: 'Deep Read Page',
+  description: 'Extract readable content and key facts from a page.',
+  parameters: [
+    {
+      name: 'candidate',
+      type: 'object',
+      required: false,
+      description: 'Web page candidate object'
+    },
+    {
+      name: 'url',
+      type: 'string',
+      required: false,
+      description: '缃戦〉URL'
+    }
+  ],
+  execute: async (input) => {
+    const { candidate, url } = input;
+    if (!candidate && !url) {
+      throw new Error('Either url or candidate.url is required');
+    }
+    const target = candidate || { url, content_type: 'web', source_type: 'web' };
+    const tool = await synthesizeTool({ goal: 'Extract web page content', target });
+    const result = await runEphemeralTool(tool);
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return {
+      ...result.extracted_data,
+      source_id: target.id || target.url,
+      url: target.url,
+      content_type: target.content_type,
+      source_type: target.source_type
+    };
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+ToolRegistry.registerTool({
+  id: 'extract_video_intel',
+  name: 'Extract Video Intel',
+  description: 'Extract video metadata and timeline details.',
+  parameters: [
+    {
+      name: 'candidate',
+      type: 'object',
+      required: true,
+      description: 'Video candidate object'
+    }
+  ],
+  execute: async (input) => {
+    const { candidate } = input;
+    const tool = await synthesizeTool({ goal: 'Extract video metadata', target: candidate });
+    const result = await runEphemeralTool(tool);
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return {
+      ...result.extracted_data,
+      source_id: candidate.id,
+      url: candidate.url,
+      content_type: candidate.content_type,
+      source_type: candidate.source_type
+    };
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+ToolRegistry.registerTool({
+  id: 'cross_check_facts',
+  name: 'Cross Check Facts',
+  description: 'Verify evidence items and detect conflicts.',
+  parameters: [
+    {
+      name: 'evidenceItems',
+      type: 'array',
+      required: true,
+      description: 'Evidence item list'
+    }
+  ],
+  execute: async (input) => {
+    return verifyEvidenceUnits(input.evidenceItems);
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+ToolRegistry.registerTool({
+  id: 'search_sources',
+  name: 'Search Sources',
+  description: 'Search related sources.',
+  parameters: [
+    {
+      name: 'query',
+      type: 'string',
+      required: true,
+      description: '鎼滅储鏌ヨ'
+    },
+    {
+      name: 'connector_ids',
+      type: 'array',
+      required: false,
+      description: '杩炴帴鍣↖D鍒楄〃'
+    }
+  ],
+  execute: async (input) => {
+    const { query, connectorIds } = input;
+    // 杩欓噷鍙互瀹炵幇鍏蜂綋鐨勬悳绱㈤€昏緫
+    // 鏆傛椂杩斿洖妯℃嫙鏁版嵁
+    return [
+      {
+        id: 'search-1',
+        title: 'Search Result 1',
+        url: 'https://example.com/result1',
+        connector: 'bing_web',
+        content_type: 'web',
+        source_type: 'web',
+        snippet: 'This is a search result snippet'
+      }
+    ];
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+ToolRegistry.registerTool({
+  id: 'test_api_endpoint',
+  name: 'API Test',
+  description: 'Send an HTTP request and validate the response.',
+  parameters: [
+    {
+      name: 'endpoint',
+      type: 'string',
+      required: true,
+      description: 'API绔偣URL'
+    },
+    {
+      name: 'method',
+      type: 'string',
+      required: false,
+      description: 'HTTP鏂规硶锛岄粯璁や负GET'
+    },
+    {
+      name: 'headers',
+      type: 'object',
+      required: false,
+      description: 'HTTP request headers'
+    },
+    {
+      name: 'body',
+      type: 'object',
+      required: false,
+      description: 'HTTP request payload'
+    },
+    {
+      name: 'timeout',
+      type: 'number',
+      required: false,
+      description: '璇锋眰瓒呮椂鏃堕棿锛堟绉掞級'
+    },
+    {
+      name: 'expectedStatus',
+      type: 'number',
+      required: false,
+      description: '鏈熸湜鐨凥TTP鐘舵€佺爜'
+    },
+    {
+      name: 'auth',
+      type: 'object',
+      required: false,
+      description: '璁よ瘉淇℃伅锛屾敮鎸乥asic鍜宐earer绫诲瀷'
+    }
+  ],
+  execute: async (input) => {
+    const { endpoint, method, headers, body, timeout, expectedStatus, auth } = input;
+    if (!endpoint) {
+      throw new Error('Missing required parameter: endpoint');
+    }
+    const result = await testApiEndpoint(endpoint, {
+      method,
+      headers,
+      body,
+      timeout,
+      expectedStatus,
+      auth
+    });
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result.data;
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+ToolRegistry.registerTool({
+  id: 'convert_data',
+  name: 'Data Converter',
+  description: '杞崲鏁版嵁鏍煎紡锛屾敮鎸丣SON鍜孋SV涔嬮棿鐨勮浆鎹紝浠ュ強鏁版嵁杩囨护銆佹槧灏勩€佹帓搴忓拰闄愬埗',
+  parameters: [
+    {
+      name: 'data',
+      type: 'any',
+      required: true,
+      description: '瑕佽浆鎹㈢殑鏁版嵁'
+    },
+    {
+      name: 'fromFormat',
+      type: 'string',
+      required: false,
+      description: '杈撳叆鏁版嵁鏍煎紡锛岄粯璁や负json'
+    },
+    {
+      name: 'toFormat',
+      type: 'string',
+      required: false,
+      description: '杈撳嚭鏁版嵁鏍煎紡锛岄粯璁や负json'
+    },
+    {
+      name: 'filter',
+      type: 'object',
+      required: false,
+      description: '杩囨护鏉′欢'
+    },
+    {
+      name: 'map',
+      type: 'object',
+      required: false,
+      description: '瀛楁鏄犲皠'
+    },
+    {
+      name: 'sortBy',
+      type: 'string',
+      required: false,
+      description: '鎺掑簭瀛楁'
+    },
+    {
+      name: 'limit',
+      type: 'number',
+      required: false,
+      description: 'Maximum number of records to return'
+    }
+  ],
+  execute: async (input) => {
+    const { data, fromFormat, toFormat, filter, map, sortBy, limit } = input;
+    if (data === undefined || data === null) {
+      throw new Error('Missing required parameter: data');
+    }
+    const result = await convertData(data, {
+      fromFormat,
+      toFormat,
+      filter,
+      map,
+      sortBy,
+      limit
+    });
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result.data;
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+// 鍝旂珯瑙嗛闊抽涓嬭浇宸ュ叿
+async function downloadBilibiliAudio(videoUrl, options = {}) {
+  const {
+    outputDir = './downloads',
+    quality = 'high',
+    format = 'mp3'
+  } = options;
+
+  try {
+    // 楠岃瘉URL鏍煎紡
+    const bvMatch = videoUrl.match(/BV[\w]+/);
+    const avMatch = videoUrl.match(/av(\d+)/);
+    
+    if (!bvMatch && !avMatch) {
+      throw new Error('Invalid Bilibili video URL. Must contain BV or av ID');
+    }
+
+    // 鑾峰彇瑙嗛椤甸潰鍐呭
+    const response = await fetch(videoUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://www.bilibili.com'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch video page: ${response.status}`);
+    }
+
+    const html = await response.text();
+
+    // 鎻愬彇瑙嗛淇℃伅
+    const titleMatch = html.match(/<h1[^>]*title="([^"]*)"/);
+    const title = titleMatch ? titleMatch[1].trim() : 'unknown';
+
+    // 鎻愬彇playinfo鏁版嵁
+    const playInfoMatch = html.match(/window\.__playinfo__\s*=\s*({[\s\S]*?})<\/script>/);
+    if (!playInfoMatch) {
+      throw new Error('Could not find playinfo data');
+    }
+
+    const playInfo = JSON.parse(playInfoMatch[1]);
+    
+    // 鑾峰彇闊抽URL
+    let audioUrl = null;
+    if (playInfo.data && playInfo.data.dash && playInfo.data.dash.audio) {
+      const audios = playInfo.data.dash.audio;
+      // 閫夋嫨鏈€楂樿川閲忕殑闊抽
+      audioUrl = audios[0].baseUrl;
+    }
+
+    if (!audioUrl) {
+      throw new Error('Could not find audio URL');
+    }
+
+    // 涓嬭浇闊抽
+    const audioResponse = await fetch(audioUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://www.bilibili.com'
+      }
+    });
+
+    if (!audioResponse.ok) {
+      throw new Error(`Failed to download audio: ${audioResponse.status}`);
+    }
+
+    const audioBuffer = await audioResponse.arrayBuffer();
+    
+    // 鐢熸垚鏂囦欢鍚?    const safeTitle = title.replace(/[^\w\s-]/g, '').replace(/\s+/g, '_');
+    const fileName = `${safeTitle}_${Date.now()}.${format}`;
+    const filePath = path.join(outputDir, fileName);
+
+    // 纭繚杈撳嚭鐩綍瀛樺湪
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    // 淇濆瓨闊抽鏂囦欢
+    fs.writeFileSync(filePath, Buffer.from(audioBuffer));
+
+    return {
+      success: true,
+      data: {
+        title: title,
+        fileName: fileName,
+        filePath: filePath,
+        fileSize: audioBuffer.byteLength,
+        format: format,
+        quality: quality,
+        videoUrl: videoUrl
+      }
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+ToolRegistry.registerTool({
+  id: 'download_bilibili_audio',
+  name: 'Bilibili Audio Downloader',
+  description: 'Download Bilibili video audio by BV or av URL.',
+  parameters: [
+    {
+      name: 'videoUrl',
+      type: 'string',
+      required: true,
+      description: '鍝旂珯瑙嗛閾炬帴锛屾敮鎸丅V鎴朼v鏍煎紡'
+    },
+    {
+      name: 'outputDir',
+      type: 'string',
+      required: false,
+      description: '闊抽鏂囦欢淇濆瓨鐩綍锛岄粯璁や负./downloads'
+    },
+    {
+      name: 'quality',
+      type: 'string',
+      required: false,
+      description: '闊抽璐ㄩ噺锛岄粯璁や负high'
+    },
+    {
+      name: 'format',
+      type: 'string',
+      required: false,
+      description: '闊抽鏍煎紡锛岄粯璁や负mp3'
+    }
+  ],
+  execute: async (input) => {
+    const { videoUrl, outputDir, quality, format } = input;
+    if (!videoUrl) {
+      throw new Error('Missing required parameter: videoUrl');
+    }
+    const result = await downloadBilibiliAudio(videoUrl, {
+      outputDir,
+      quality,
+      format
+    });
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result.data;
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+// 鎶栭煶瑙嗛淇℃伅鎻愬彇宸ュ叿
+async function extractDouyinVideoInfo(videoUrl, options = {}) {
+  const {
+    cookie = null,
+    includeDownloadMethods = true
+  } = options;
+
+  try {
+    // 楠岃瘉URL鏍煎紡
+    const douyinPattern = /douyin\.com|iesdouyin\.com/;
+    if (!douyinPattern.test(videoUrl)) {
+      throw new Error('Invalid Douyin video URL. Must be a douyin.com or iesdouyin.com link');
+    }
+
+    // 澶勭悊鐭摼鎺ワ紝鑾峰彇鐪熷疄URL
+    let realUrl = videoUrl;
+    let shortUrlRedirect = null;
+    
+    if (videoUrl.includes('v.douyin.com')) {
+      try {
+        const response = await fetch(videoUrl, {
+          redirect: 'manual',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
+          }
+        });
+        
+        if (response.status === 302 || response.status === 301) {
+          shortUrlRedirect = response.headers.get('location') || videoUrl;
+          // 妫€鏌ユ槸鍚︽槸搴旂敤鍗忚
+          if (shortUrlRedirect && !shortUrlRedirect.startsWith('sslocal://')) {
+            realUrl = shortUrlRedirect;
+          }
+        }
+      } catch (e) {
+        // 鐭摼鎺ュ鐞嗗け璐ワ紝缁х画浣跨敤鍘熷URL
+      }
+    }
+
+    // 鎻愬彇瑙嗛ID
+    const videoIdMatch = realUrl.match(/video\/(\d+)/);
+    const videoId = videoIdMatch ? videoIdMatch[1] : null;
+    
+    // 鏋勫缓鍒嗕韩閾炬帴
+    const shareUrl = videoId ? `https://v.douyin.com/${videoId}/` : videoUrl;
+
+    // 鑾峰彇瑙嗛椤甸潰鍐呭
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+      'Referer': 'https://www.douyin.com/'
+    };
+    
+    if (cookie) {
+      headers['Cookie'] = cookie;
     }
     
-    const payload = input && typeof input === "object" ? input : {};
-    for (const param of tool.parameters) {
-      // 这里可以添加更复杂的 schema 验证
-      // 暂时使用简单的参数检查
-      for (const param of tool.parameters) {
-        if (param.required && !Object.prototype.hasOwnProperty.call(payload, param.name)) {
-          throw new Error(`Missing required parameter: ${param.name}`);
+    const response = await fetch(realUrl, {
+      headers: headers
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch video page: ${response.status}`);
+    }
+
+    const html = await response.text();
+
+    // 鎻愬彇瑙嗛淇℃伅
+    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/);
+    const title = titleMatch ? titleMatch[1].replace(' - 鎶栭煶', '').trim() : 'unknown';
+
+    // Extract video download url
+    let videoDownloadUrl = null;
+    let extractionMethod = null;
+    
+    // Try extracting from SSR hydrated data first.
+    const ssrDataMatch = html.match(/<script[^>]*>window\._SSR_HYDRATED_DATA\s*=\s*({[\s\S]*?})<\/script>/);
+    if (ssrDataMatch) {
+      try {
+        const ssrData = JSON.parse(ssrDataMatch[1]);
+        if (ssrData.app && ssrData.app.videoDetail && ssrData.app.videoDetail.video) {
+          const videoInfo = ssrData.app.videoDetail.video;
+          // Prefer no-watermark playback URL when available.
+          if (videoInfo.playAddr) {
+            videoDownloadUrl = videoInfo.playAddr;
+            extractionMethod = 'SSR_HYDRATED_DATA.playAddr';
+          } else if (videoInfo.downloadAddr) {
+            videoDownloadUrl = videoInfo.downloadAddr;
+            extractionMethod = 'SSR_HYDRATED_DATA.downloadAddr';
+          }
+        }
+      } catch (parseError) {
+        // Ignore parse failures and continue
+      }
+    }
+
+    // If SSR data does not contain media URL, try render data.
+    if (!videoDownloadUrl) {
+      const renderDataMatch = html.match(/<script[^>]*>window\._RENDER_DATA\s*=\s*({[\s\S]*?})<\/script>/);
+      if (renderDataMatch) {
+        try {
+          const renderData = JSON.parse(renderDataMatch[1]);
+          // 鍦ㄦ覆鏌撴暟鎹腑瀵绘壘瑙嗛URL
+          const videoData = findVideoUrlInObject(renderData);
+          if (videoData) {
+            videoDownloadUrl = videoData;
+            extractionMethod = 'RENDER_DATA';
+          }
+        } catch (parseError) {
+          // 瑙ｆ瀽澶辫触
         }
       }
     }
 
-    if (typeof tool.validate === "function") {
-      tool.validate(payload);
+    // If still missing, try HTML video tag.
+    if (!videoDownloadUrl) {
+      const videoTagMatch = html.match(/<video[^>]*src="([^"]*)"[^>]*>/);
+      if (videoTagMatch) {
+        videoDownloadUrl = videoTagMatch[1];
+        extractionMethod = 'video_tag';
+      }
     }
 
-    return true;
-  },
-  
-  getToolCapabilities() {
-    return this.getTools().map(tool => ({
-      id: tool.id,
-      base_tool_id: tool.base_tool_id,
-      version: tool.version,
-      status: tool.status,
-      lifecycle_state: tool.lifecycle_state || null,
-      source: tool.source,
-      promoted_to_builtin: tool.promoted_to_builtin,
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-      hasInputSchema: !!tool.inputSchema,
-      hasOutputSchema: !!tool.outputSchema,
-      verifier_verdict: tool.verifier_verdict || null
-    }));
-  },
-  
-  testTool(toolId, testInput) {
-    const tool = this.getTool(toolId);
-    if (!tool) {
-      return { success: false, error: `Tool not found: ${toolId}` };
+    // If still missing, try play_url style fields.
+    if (!videoDownloadUrl) {
+      const playUrlMatch = html.match(/play_url["']?\s*:\s*["']([^"']+)["']/);
+      if (playUrlMatch) {
+        videoDownloadUrl = playUrlMatch[1];
+        extractionMethod = 'play_url_param';
+      }
     }
+
+    // If still not found, scan all mp4 links in page source.
+    if (!videoDownloadUrl) {
+      const allUrls = html.match(/https?:\/\/[^"'\s]+\.mp4[^"'\s]*/g);
+      if (allUrls && allUrls.length > 0) {
+        videoDownloadUrl = allUrls[0];
+        extractionMethod = 'regex_mp4';
+      }
+    }
+
+    // Check whether the page uses JavaScript anti-bot protection
+    const hasJsProtection = html.includes('_$jsvmprt') || html.includes('byted_acrawler');
     
-    try {
-      this.validateToolInput(toolId, testInput);
-      return { success: true, message: 'Input validation passed' };
-    } catch (error) {
-      return { success: false, error: error.message };
+    // Build downloadable-method suggestions.
+    let downloadMethods = [];
+    if (includeDownloadMethods) {
+      downloadMethods = [
+        {
+          name: 'Browser developer tools',
+          description: 'Inspect network requests to locate the media URL',
+          steps: [
+            '1. Open the video page in a browser',
+            '2. Press F12 to open developer tools',
+            '3. Switch to the Network panel',
+            '4. Play the video and filter mp4/media requests',
+            '5. Copy the media URL'
+          ],
+          difficulty: 'medium',
+          successRate: 'high'
+        },
+        {
+          name: 'Online parser tools',
+          description: 'Use an external URL parser service',
+          examples: [
+            'https://douyin.video',
+            'https://www.tiktok.com/download',
+            'Any stable no-watermark parser service'
+          ],
+          difficulty: 'easy',
+          successRate: 'medium'
+        },
+        {
+          name: 'Python + Selenium',
+          description: 'Use browser automation to retrieve media source',
+          code: `from selenium import webdriver
+from selenium.webdriver.common.by import By
+import time
+
+driver = webdriver.Chrome()
+driver.get('${realUrl}')
+time.sleep(5)
+video = driver.find_element(By.TAG_NAME, 'video')
+video_url = video.get_attribute('src')
+print(video_url)`,
+          difficulty: 'hard',
+          successRate: 'high'
+        },
+        {
+          name: 'Mobile app share flow',
+          description: 'Copy link in app and parse with external tool',
+          steps: [
+            '1. Open the video in app',
+            '2. Tap share',
+            '3. Copy link',
+            '4. Parse using an external tool'
+          ],
+          difficulty: 'easy',
+          successRate: 'high'
+        }
+      ];
+      
+      // 濡傛灉鏈塁ookie锛屾坊鍔燙ookie鏂规硶
+      if (!cookie && hasJsProtection) {
+        downloadMethods.unshift({
+          name: 'Use cookie authentication',
+          description: 'Provide a valid Douyin web cookie',
+          steps: [
+            '1. Log in on web',
+            '2. Open developer tools',
+            '3. Locate cookies in storage panel',
+            '4. Copy cookie string',
+            '5. Pass it via the cookie parameter'
+          ],
+          difficulty: 'medium',
+          successRate: 'high'
+        });
+      }
+    }
+
+    return {
+      success: true,
+      data: {
+        title: title,
+        videoId: videoId,
+        originalUrl: videoUrl,
+        resolvedUrl: realUrl,
+        shareUrl: shareUrl,
+        shortUrlRedirect: shortUrlRedirect,
+        videoDownloadUrl: videoDownloadUrl,
+        extractionMethod: extractionMethod,
+        hasJsProtection: hasJsProtection,
+        pageLength: html.length,
+        extractionStatus: videoDownloadUrl ? 'success' : (hasJsProtection ? 'js_protection' : 'not_found'),
+        suggestions: videoDownloadUrl ? [] : [
+          hasJsProtection ? '椤甸潰浣跨敤浜咼avaScript淇濇姢锛屽缓璁彁渚涙湁鏁堢殑Cookie' : null,
+          '鍙互灏濊瘯浣跨敤绗笁鏂逛笅杞藉伐鍏锋垨API',
+          '鍙互浣跨敤娴忚鍣ㄥ紑鍙戣€呭伐鍏锋墜鍔ㄨ幏鍙栬棰戝湴鍧€',
+          'Try Selenium or Playwright browser automation as fallback'
+        ].filter(Boolean),
+        downloadMethods: videoDownloadUrl ? [] : downloadMethods,
+        metadata: {
+          platform: 'douyin',
+          urlType: videoUrl.includes('v.douyin.com') ? 'short' : 'full',
+          extractedAt: new Date().toISOString(),
+          toolVersion: '2.0'
+        }
+      }
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// 鎵归噺鎻愬彇鎶栭煶瑙嗛淇℃伅
+async function batchExtractDouyinVideoInfo(videoUrls, options = {}) {
+  const {
+    cookie = null,
+    concurrency = 3,
+    delay = 1000
+  } = options;
+
+  const results = [];
+  const errors = [];
+
+  for (let i = 0; i < videoUrls.length; i += concurrency) {
+    const batch = videoUrls.slice(i, i + concurrency);
+    
+    const batchPromises = batch.map(async (url, index) => {
+      // 娣诲姞寤惰繜閬垮厤璇锋眰杩囧揩
+      if (index > 0) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+      
+      const result = await extractDouyinVideoInfo(url, { cookie });
+      return {
+        url: url,
+        ...result
+      };
+    });
+
+    const batchResults = await Promise.allSettled(batchPromises);
+    
+    batchResults.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        results.push(result.value);
+      } else {
+        errors.push({
+          url: batch[index],
+          error: result.reason.message
+        });
+      }
+    });
+  }
+
+  return {
+    success: true,
+    data: {
+      total: videoUrls.length,
+      successful: results.filter(r => r.success).length,
+      failed: errors.length,
+      results: results,
+      errors: errors
+    }
+  };
+}
+
+// 杈呭姪鍑芥暟锛氬湪瀵硅薄涓€掑綊鏌ユ壘瑙嗛URL
+function findVideoUrlInObject(obj) {
+  if (typeof obj !== 'object' || obj === null) {
+    return null;
+  }
+
+  for (const key in obj) {
+    if (typeof obj[key] === 'string') {
+      // Look for values that resemble video URLs.
+      if (obj[key].includes('.mp4') || obj[key].includes('video')) {
+        if (obj[key].startsWith('http')) {
+          return obj[key];
+        }
+      }
+    } else if (typeof obj[key] === 'object') {
+      const result = findVideoUrlInObject(obj[key]);
+      if (result) {
+        return result;
+      }
     }
   }
-};
+  return null;
+}
+
+ToolRegistry.registerTool({
+  id: 'extract_douyin_video_info',
+  name: 'Douyin Video Info Extractor',
+  description: 'Extract Douyin video information from short or full URLs.',
+  parameters: [
+    {
+      name: 'videoUrl',
+      type: 'string',
+      required: true,
+      description: '鎶栭煶瑙嗛閾炬帴锛屾敮鎸乿.douyin.com鐭摼鎺ュ拰瀹屾暣閾炬帴'
+    },
+    {
+      name: 'cookie',
+      type: 'string',
+      required: false,
+      description: 'Optional Douyin cookie for gated pages'
+    }
+  ],
+  execute: async (input) => {
+    const { videoUrl, cookie } = input;
+    if (!videoUrl) {
+      throw new Error('Missing required parameter: videoUrl');
+    }
+    const result = await extractDouyinVideoInfo(videoUrl, {
+      cookie
+    });
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result.data;
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+ToolRegistry.registerTool({
+  id: 'batch_extract_douyin_video_info',
+  name: 'Batch Douyin Video Info Extractor',
+  description: 'Batch extract Douyin video metadata with concurrency control.',
+  parameters: [
+    {
+      name: 'videoUrls',
+      type: 'array',
+      required: true,
+      description: 'List of Douyin video URLs'
+    },
+    {
+      name: 'cookie',
+      type: 'string',
+      required: false,
+      description: 'Optional Douyin cookie for gated pages'
+    },
+    {
+      name: 'concurrency',
+      type: 'number',
+      required: false,
+      description: '骞跺彂鏁帮紝榛樿涓?'
+    },
+    {
+      name: 'delay',
+      type: 'number',
+      required: false,
+      description: '璇锋眰闂撮殧寤惰繜锛堟绉掞級锛岄粯璁や负1000'
+    }
+  ],
+  execute: async (input) => {
+    const { videoUrls, cookie, concurrency, delay } = input;
+    if (!videoUrls || !Array.isArray(videoUrls) || videoUrls.length === 0) {
+      throw new Error('Missing required parameter: videoUrls (must be a non-empty array)');
+    }
+    const result = await batchExtractDouyinVideoInfo(videoUrls, {
+      cookie,
+      concurrency,
+      delay
+    });
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result.data;
+  },
+  source: 'builtin',
+  status: 'active'
+});
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Douyin downloader backed by third-party parser APIs.
+async function downloadDouyinVideo(videoUrl, options = {}) {
+  const {
+    outputDir = './downloads',
+    filename = null,
+    apiUrl = 'https://apis.jxcxin.cn/api/douyin'
+  } = options;
+
+  try {
+    // 楠岃瘉URL鏍煎紡
+    const douyinPattern = /douyin\.com|iesdouyin\.com/;
+    if (!douyinPattern.test(videoUrl)) {
+      throw new Error('Invalid Douyin video URL. Must be a douyin.com or iesdouyin.com link');
+    }
+
+    console.log(`姝ｅ湪瑙ｆ瀽瑙嗛: ${videoUrl}`);
+    
+    // 璋冪敤瑙ｆ瀽API
+    const apiEndpoint = `${apiUrl}?url=${encodeURIComponent(videoUrl)}`;
+    
+    const response = await fetch(apiEndpoint, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`API request failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (data.code !== 200 || !data.data) {
+      throw new Error(`API error: ${data.msg || 'Unknown error'}`);
+    }
+
+    const videoData = data.data;
+    
+    // 鑾峰彇瑙嗛涓嬭浇鍦板潃
+    const videoDownloadUrl = videoData.video || videoData.play_url || videoData.url;
+    const coverUrl = videoData.cover;
+    const title = videoData.title || 'douyin_video';
+    const author = videoData.author || 'unknown';
+    
+    if (!videoDownloadUrl) {
+      throw new Error('No video URL found in API response');
+    }
+
+    console.log(`瑙ｆ瀽鎴愬姛锛屽噯澶囦笅杞? ${title}`);
+    console.log(`瑙嗛鍦板潃: ${videoDownloadUrl}`);
+
+    // 鍒涘缓涓嬭浇鐩綍
+    const fs = require('fs');
+    const path = require('path');
+    
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    // Build safe output filename
+    const safeTitle = title.replace(/[<>:"/\\|?*]/g, '_').substring(0, 50);
+    const safeAuthor = author.replace(/[<>:"/\\|?*]/g, '_').substring(0, 30);
+    const finalFilename = filename || `${safeAuthor}_${safeTitle}_${Date.now()}.mp4`;
+    const outputPath = path.join(outputDir, finalFilename);
+
+    // 涓嬭浇瑙嗛
+    console.log(`寮€濮嬩笅杞藉埌: ${outputPath}`);
+    
+    const videoResponse = await fetch(videoDownloadUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.douyin.com/'
+      }
+    });
+
+    if (!videoResponse.ok) {
+      throw new Error(`Video download failed: ${videoResponse.status}`);
+    }
+
+    // 鑾峰彇瑙嗛娴佸苟淇濆瓨
+    const arrayBuffer = await videoResponse.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    fs.writeFileSync(outputPath, buffer);
+    
+    const fileSize = (buffer.length / 1024 / 1024).toFixed(2);
+    console.log(`涓嬭浇瀹屾垚! 鏂囦欢澶у皬: ${fileSize} MB`);
+
+    return {
+      success: true,
+      data: {
+        title: title,
+        author: author,
+        videoUrl: videoDownloadUrl,
+        coverUrl: coverUrl,
+        downloadPath: outputPath,
+        filename: finalFilename,
+        fileSize: `${fileSize} MB`,
+        fileSizeBytes: buffer.length
+      }
+    };
+
+  } catch (error) {
+    console.error('涓嬭浇澶辫触:', error.message);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// 鎵归噺涓嬭浇鎶栭煶瑙嗛
+async function batchDownloadDouyinVideos(videoUrls, options = {}) {
+  const {
+    outputDir = './downloads',
+    concurrency = 2,
+    delay = 2000
+  } = options;
+
+  const results = [];
+  const errors = [];
+
+  for (let i = 0; i < videoUrls.length; i += concurrency) {
+    const batch = videoUrls.slice(i, i + concurrency);
+    
+    const batchPromises = batch.map(async (url, index) => {
+      // 娣诲姞寤惰繜閬垮厤璇锋眰杩囧揩
+      if (index > 0) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+      
+      console.log(`\n[${i + index + 1}/${videoUrls.length}] 寮€濮嬪鐞? ${url}`);
+      
+      const result = await downloadDouyinVideo(url, { outputDir });
+      return {
+        url: url,
+        ...result
+      };
+    });
+
+    const batchResults = await Promise.allSettled(batchPromises);
+    
+    batchResults.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        results.push(result.value);
+        if (result.value.success) {
+          console.log(`鉁?鎴愬姛: ${result.value.data.filename}`);
+        } else {
+          console.log(`鉂?澶辫触: ${result.value.error}`);
+          errors.push({
+            url: batch[index],
+            error: result.value.error
+          });
+        }
+      } else {
+        console.log(`鉂?澶辫触: ${result.reason.message}`);
+        errors.push({
+          url: batch[index],
+          error: result.reason.message
+        });
+      }
+    });
+  }
+
+  return {
+    success: true,
+    data: {
+      total: videoUrls.length,
+      successful: results.filter(r => r.success).length,
+      failed: errors.length,
+      results: results,
+      errors: errors,
+      outputDir: outputDir
+    }
+  };
 }
 
 async function fetchText(url, options = {}) {
@@ -515,54 +1626,25 @@ function unique(items) {
 
 function extractFocusTerms(query) {
   const raw = String(query || "");
-  const englishTerms = raw.match(/[A-Za-z][A-Za-z0-9._+-]{1,20}/g) || [];
-  const cleanedChinese = raw
-    .replace(/[0-9A-Za-z._+-]+/g, " ")
-    .replace(/[，。！？、,:：；“”"'（）()【】\[\]<>《》]/g, " ")
-    .replace(/(什么|多少|哪些|为什么|如何|现在|当前|最新|最近|比较|相比|还有|以及|这个|那个|就是|一下|一下子|上手|教程|使用|反馈|视频|文章|新闻|动态|模型|产品|功能|架构|更新|互联网|中文|有哪些|有关|相关|时候|情况)/g, " ")
-    .split(/\s+/)
-    .flatMap((item) => item.match(/[\u4e00-\u9fff]{2,8}/g) || []);
-
-  return unique([...englishTerms, ...cleanedChinese]).slice(0, 5);
+  const englishTerms = raw.match(/[A-Za-z][A-Za-z0-9._+-]{1,32}/g) || [];
+  const chineseTerms = raw.match(/[\u4e00-\u9fff]{2,8}/g) || [];
+  return unique([...englishTerms, ...chineseTerms]).slice(0, 6);
 }
 
 function buildDouyinSearchUrl(query) {
   const normalizedQuery = normalizeWhitespace(String(query || "").replace(/\s+/g, " "));
-  const finalQuery = /视频/.test(normalizedQuery) ? normalizedQuery : `${normalizedQuery} 视频`;
+  const finalQuery = /视频|video/i.test(normalizedQuery) ? normalizedQuery : `${normalizedQuery} 视频`;
   return `https://www.douyin.com/search/${encodeURIComponent(finalQuery)}`;
 }
 
 function buildQueryTokens(query) {
-  const tokens = new Set(
-    String(query || "")
-      .toLowerCase()
-      .match(/[a-z0-9][a-z0-9._-]{1,}/g) || []
-  );
-
-  const dictionary = [
-    [/苹果/g, ["apple", "iphone", "苹果"]],
-    [/性能/g, ["performance", "benchmark", "性能"]],
-    [/更新|升级/g, ["update", "更新", "升级"]],
-    [/架构/g, ["architecture", "架构"]],
-    [/视频|访谈|演讲|发布会/g, ["video", "talk", "视频", "访谈", "演讲", "发布会"]],
-    [/研究|论文/g, ["research", "paper", "研究", "论文"]],
-    [/搜索/g, ["search", "搜索"]],
-    [/规划/g, ["planner", "workflow", "规划"]],
-    [/时长|秒|分钟/g, ["seconds", "duration", "时长", "分钟", "秒"]],
-    [/教程/g, ["tutorial", "教程"]],
-    [/模型/g, ["model", "模型"]],
-    [/产品/g, ["product", "产品"]]
-  ];
-
-  for (const [pattern, words] of dictionary) {
-    if (pattern.test(query)) {
-      for (const word of words) {
-        tokens.add(word);
-      }
-    }
+  const raw = String(query || "");
+  const tokens = new Set(raw.toLowerCase().match(/[a-z0-9][a-z0-9._-]{1,}/g) || []);
+  const focusTerms = extractFocusTerms(raw).map((item) => String(item).toLowerCase());
+  for (const term of focusTerms) {
+    tokens.add(term);
   }
-
-  return Array.from(tokens);
+  return Array.from(tokens).slice(0, 24);
 }
 
 function makeId(prefix, value) {
@@ -638,7 +1720,7 @@ function extractReaderMarkdown(value) {
 
 function splitIntoSentences(value) {
   return String(value || "")
-    .split(/(?<=[.!?。！？])\s+/)
+    .split(/[.!?。！？]+\s+/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
@@ -670,7 +1752,7 @@ function buildSectionsFromMarkdown(markdown) {
       continue;
     }
     if (!current) {
-      current = { heading: "摘要", excerpt: line };
+      current = { heading: "鎽樿", excerpt: line };
       continue;
     }
     if (!current.excerpt) {
@@ -1461,28 +2543,28 @@ function buildTranscriptTimeline(cues) {
     return {
       start: timestampFromMilliseconds(segment.start * 1000),
       end: timestampFromMilliseconds(segment.end * 1000),
-      title: segment.texts[0]?.slice(0, 42) || "片段",
+      title: segment.texts[0]?.slice(0, 42) || "鐗囨",
       summary: summary.length > 0 ? summary[0] : fullText.slice(0, 220),
       full_text: fullText.slice(0, 500)
     };
   });
 }
 
-// 提取视频关键观点和时间点
+// 鎻愬彇瑙嗛鍏抽敭瑙傜偣鍜屾椂闂寸偣
 function extractVideoKeyPoints(transcript, maxPoints = 8) {
   if (!transcript || transcript.length === 0) {
     return [];
   }
 
   const keyPatterns = [
-    /最重要|关键|核心|主要|本质/,
-    /首先|第一|第二|第三|最后/,
-    /但是|然而|不过|虽然|尽管/,
-    /因为|所以|因此|由于|导致/,
-    /比如|例如|就像|相当于/,
-    /需要|必须|应该|可以|能够/,
-    /问题|挑战|难点|困难|优势|劣势/,
-    /总结|结论|总的来说|总而言之/
+    /关键|核心|重点|主要|本质|important|key|core/i,
+    /首先|第一|第二|第三|最后|first|second|third|finally/i,
+    /但是|不过|然而|虽然|but|however|although/i,
+    /因为|所以|因此|导致|because|therefore|result/i,
+    /比如|例如|就像|for example|such as/i,
+    /需要|必须|应该|可以|need|must|should|can/i,
+    /问题|挑战|难点|优势|劣势|problem|challenge|risk|advantage/i,
+    /总结|结论|总的来说|conclusion|summary/i
   ];
 
   const candidates = [];
@@ -1530,12 +2612,12 @@ function extractVideoKeyPoints(transcript, maxPoints = 8) {
 
 function classifyKeyPoint(text) {
   const patterns = {
-    conclusion: /总结|结论|总的来说|总而言之|最终|总的来说/,
-    step: /首先|第一|第二|第三|最后|步骤|阶段/,
-    contrast: /但是|然而|不过|虽然|尽管|相反/,
-    cause: /因为|所以|因此|由于|导致|造成/,
-    example: /比如|例如|就像|相当于|比如/,
-    requirement: /需要|必须|应该|可以|能够|必须|应该/
+    conclusion: /总结|结论|总的来说|overall|in conclusion/i,
+    step: /首先|第一|第二|第三|最后|步骤|阶段|first|second|third|finally/i,
+    contrast: /但是|不过|然而|虽然|尽管|相反|but|however|although/i,
+    cause: /因为|所以|因此|由于|导致|造成|because|therefore|result/i,
+    example: /比如|例如|就像|for example|such as/i,
+    requirement: /需要|必须|应该|可以|能够|need|must|should|can/i
   };
 
   for (const [type, pattern] of Object.entries(patterns)) {
@@ -1546,7 +2628,7 @@ function classifyKeyPoint(text) {
   return "insight";
 }
 
-// 视频转MP3功能
+// 瑙嗛杞琈P3鍔熻兘
 async function convertVideoToMp3(videoUrl, outputPath) {
   return new Promise((resolve, reject) => {
     const ytDlpPath = path.join(os.tmpdir(), "yt-dlp.exe");
@@ -1573,7 +2655,7 @@ async function convertVideoToMp3(videoUrl, outputPath) {
       if (code === 0) {
         resolve(outputPath);
       } else {
-        reject(new Error(`视频转MP3失败: ${error}`));
+        reject(new Error(`瑙嗛杞琈P3澶辫触: ${error}`));
       }
     });
 
@@ -1583,10 +2665,10 @@ async function convertVideoToMp3(videoUrl, outputPath) {
   });
 }
 
-// 通过ARS API转文本
+// Transcribe audio through ARS API.
 async function transcribeWithArsApi(audioPath) {
   if (!VIDEO_PROCESSING_CONFIG.arsApi.enabled || !VIDEO_PROCESSING_CONFIG.arsApi.apiKey) {
-    throw new Error("ARS API 未配置或未启用");
+    throw new Error("ARS API is not configured or enabled");
   }
 
   const formData = new FormData();
@@ -1601,16 +2683,16 @@ async function transcribeWithArsApi(audioPath) {
   });
 
   if (!response.ok) {
-    throw new Error(`ARS API 调用失败: ${await response.text()}`);
+    throw new Error(`ARS API request failed: ${await response.text()}`);
   }
 
   return await response.json();
 }
 
-// 通过开源模型转文本
+// 閫氳繃寮€婧愭ā鍨嬭浆鏂囨湰
 async function transcribeWithOpenSourceModel(audioPath) {
   if (!VIDEO_PROCESSING_CONFIG.openSourceModel.enabled) {
-    throw new Error("开源模型未配置或未启用");
+    throw new Error("寮€婧愭ā鍨嬫湭閰嶇疆鎴栨湭鍚敤");
   }
 
   const formData = new FormData();
@@ -1623,13 +2705,13 @@ async function transcribeWithOpenSourceModel(audioPath) {
   });
 
   if (!response.ok) {
-    throw new Error(`开源模型调用失败: ${await response.text()}`);
+    throw new Error(`寮€婧愭ā鍨嬭皟鐢ㄥけ璐? ${await response.text()}`);
   }
 
   return await response.json();
 }
 
-// 视频转文本主函数
+// 瑙嗛杞枃鏈富鍑芥暟
 async function transcribeVideo(videoUrl) {
   const tempDir = os.tmpdir();
   const audioPath = path.join(tempDir, `audio_${Date.now()}.mp3`);
@@ -1651,7 +2733,7 @@ async function transcribeVideo(videoUrl) {
           key_points: keyPoints
         };
       } catch (arsError) {
-        console.warn("ARS API 调用失败，尝试使用开源模型:", arsError.message);
+        console.warn("ARS API 璋冪敤澶辫触锛屽皾璇曚娇鐢ㄥ紑婧愭ā鍨?", arsError.message);
       }
     }
 
@@ -1669,17 +2751,17 @@ async function transcribeVideo(videoUrl) {
           key_points: keyPoints
         };
       } catch (openSourceError) {
-        console.warn("开源模型调用失败:", openSourceError.message);
+        console.warn("Open-source transcription failed:", openSourceError.message);
       }
     }
 
-    throw new Error("所有转文本方法均失败");
+    throw new Error("All transcription methods failed");
   } finally {
     if (fs.existsSync(audioPath)) {
       try {
         fs.unlinkSync(audioPath);
       } catch (error) {
-        console.warn("清理临时文件失败:", error.message);
+        console.warn("Failed to clean temporary file:", error.message);
       }
     }
   }
@@ -1714,7 +2796,7 @@ function parseBingSearchMarkdown(markdown, query) {
       .filter((line) => line && !/^[-=]{3,}$/.test(line));
 
     const summaryLine = rest.join(" ").replace(/\s+/g, " ").trim();
-    const publishedMatch = summaryLine.match(/^([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})·\s*/);
+    const publishedMatch = summaryLine.match(/^([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})路\s*/);
     const summary = publishedMatch ? summaryLine.replace(publishedMatch[0], "") : summaryLine;
     if (!summary || /Can't use this link|Unable to process this search/i.test(summary)) {
       continue;
@@ -1808,7 +2890,7 @@ function parseSegmentFaultSearchHtml(html, query) {
         platform: "SegmentFault",
         content_type: "document",
         source_type: "document",
-        author: "SegmentFault 作者",
+        author: "SegmentFault Author",
         published_at: contents.created ? new Date(contents.created * 1000).toISOString() : null,
         duration: null,
         engagement: (contents.votes || 0) + (contents.comments || 0),
@@ -1833,7 +2915,7 @@ function parseBilibiliSearchHtml(html, query) {
     const bvid = match[1];
     const duration = normalizeWhitespace(match[2]);
     const title = stripTags(match[3]);
-    const author = stripTags(match[4]) || "Bilibili UP 主";
+    const author = stripTags(match[4]) || "Bilibili Creator";
     const url = `https://www.bilibili.com/video/${bvid}/`;
 
     candidates.push({
@@ -1849,7 +2931,7 @@ function parseBilibiliSearchHtml(html, query) {
       duration,
       engagement: null,
       authority_score: 0.76,
-      summary: `Bilibili 视频结果：${title}`,
+      summary: `Bilibili 瑙嗛缁撴灉锛?{title}`,
       matched_query: query,
       score: Number(((chineseQuery ? 0.94 : 0.68) - index * 0.05).toFixed(4)),
       metadata: {
@@ -2003,24 +3085,24 @@ async function searchBilibili(query) {
 
 async function searchDouyin(query) {
   const normalizedQuery = normalizeWhitespace(String(query || "").replace(/\s+/g, " "));
-  const finalQuery = /视频/.test(normalizedQuery) ? normalizedQuery : `${normalizedQuery} 视频`;
+  const finalQuery = /瑙嗛/.test(normalizedQuery) ? normalizedQuery : `${normalizedQuery} 瑙嗛`;
   const url = buildDouyinSearchUrl(query);
 
   return [
     {
       id: makeId("video", url),
       connector: "douyin",
-      title: `${finalQuery} - 抖音搜索`,
+      title: `${finalQuery} - 鎶栭煶鎼滅储`,
       url,
-      platform: "抖音",
+      platform: "鎶栭煶",
       content_type: "video",
       source_type: "video",
-      author: "抖音",
+      author: "鎶栭煶",
       published_at: null,
       duration: null,
       engagement: null,
       authority_score: 0.78,
-      summary: "抖音站内视频搜索入口，适合查中文热点、演讲片段、现场视频和短视频反馈。",
+      summary: "Douyin in-site video search entry for Chinese trending clips and event videos.",
       matched_query: query,
       score: Number((isChineseText(query) ? 0.9 : 0.62).toFixed(4)),
       metadata: {
@@ -2052,64 +3134,64 @@ const connectorRegistry = [
   {
     id: "bing_web",
     label: "Bing Web + Jina Reader",
-    description: "通用网页入口，可用于抓官方页、新闻页、长文页，再通过 Jina Reader 做正文抽取。",
-    capabilities: ["搜索", "网页", "新闻", "官方页", "正文抽取"],
+    description: "General-purpose web search and page reading via Jina Reader.",
+    capabilities: ["search", "web", "news", "official pages", "content extraction"],
     search: searchBingWeb,
     read: readWebSource
   },
   {
     id: "hacker_news",
     label: "Hacker News",
-    description: "讨论型来源，可用于补充社区观点、原始帖子和高价值评论。",
-    capabilities: ["搜索", "讨论", "社区", "评论", "正文抽取"],
+    description: "Community discussion source for opinions and early signals.",
+    capabilities: ["search", "discussion", "community", "comments", "content extraction"],
     search: searchHackerNews,
     read: readHackerNewsSource
   },
   {
     id: "segmentfault",
-    label: "SegmentFault 思否",
-    description: "中文开发者社区来源，可用于长文、经验总结、技术背景和教程。",
-    capabilities: ["搜索", "长文", "教程", "社区", "正文抽取"],
+    label: "SegmentFault",
+    description: "Chinese developer community source for tutorials and deep technical articles.",
+    capabilities: ["search", "long-form", "tutorials", "community", "content extraction"],
     search: searchSegmentFault,
     read: readSegmentFaultSource
   },
   {
     id: "ithome",
-    label: "IT之家",
-    description: "中文科技资讯来源，可用于新闻、产品动态和行业消息。",
-    capabilities: ["搜索", "新闻", "动态", "产品", "正文抽取"],
+    label: "ITHome",
+    description: "Chinese tech news source for product and industry updates.",
+    capabilities: ["search", "news", "updates", "products", "content extraction"],
     search: searchITHome,
     read: readITHomeSource
   },
   {
     id: "arxiv",
     label: "arXiv",
-    description: "研究型来源，可用于论文、研究摘要和长期技术背景。",
-    capabilities: ["搜索", "论文", "研究", "摘要", "正文抽取"],
+    description: "Research source for papers, abstracts, and citations.",
+    capabilities: ["search", "papers", "research", "abstracts", "content extraction"],
     search: searchArxiv,
     read: readArxivSource
   },
   {
     id: "bilibili",
     label: "Bilibili",
-    description: "中文视频来源，可用于教程、拆解视频、创作者观察和热点反馈。",
-    capabilities: ["搜索", "视频", "教程", "中文内容", "视频详情"],
+    description: "Chinese video platform for tutorials, talks, and creator content.",
+    capabilities: ["search", "video", "tutorials", "chinese content", "video metadata"],
     search: searchBilibili,
     read: readBilibiliSource
   },
   {
     id: "douyin",
-    label: "抖音",
-    description: "中文短视频来源，可用于热点视频、演讲片段、现场画面和中文短视频反馈。",
-    capabilities: ["搜索", "视频", "短视频", "中文内容", "站内搜索入口"],
+    label: "Douyin",
+    description: "Chinese short-video source for trending clips and event footage.",
+    capabilities: ["search", "video", "short-form", "chinese content", "in-site search"],
     search: searchDouyin,
     read: readDouyinSourceV2
   },
   {
     id: "ted",
     label: "TED",
-    description: "视频演讲来源，可用于 Talk 页面描述、时长和 transcript。",
-    capabilities: ["搜索", "视频", "演讲", "转写", "视频详情"],
+    description: "Talk-video source with transcripts and speaker metadata.",
+    capabilities: ["search", "video", "talks", "transcripts", "video metadata"],
     search: searchTed,
     read: readTedSource
   }
@@ -2232,15 +3314,15 @@ async function readHackerNewsSource(candidate) {
   const markdown = [
     `# ${item.title || candidate.title}`,
     "",
-    `来源：Hacker News`,
-    candidate.metadata?.external_url ? `原文链接：${candidate.metadata.external_url}` : "",
+    "Source: Hacker News",
+    candidate.metadata?.external_url ? `Original URL: ${candidate.metadata.external_url}` : "",
     "",
-    item.text ? stripTags(item.text) : "原帖没有正文，以下为评论摘要。",
+    item.text ? stripTags(item.text) : "Original post has no body text; comment highlights are listed below.",
     "",
-    articleMarkdown ? "## 关联原文摘要\n" : "",
+    articleMarkdown ? "## Related Article Summary\n" : "",
     articleMarkdown || "",
     "",
-    comments.length ? "## 高价值评论\n" : "",
+    comments.length ? "## Top Comments\n" : "",
     ...comments.map((comment) => `- ${comment.author}: ${comment.text}`)
   ].filter(Boolean).join("\n");
 
@@ -2255,7 +3337,7 @@ async function readHackerNewsSource(candidate) {
     published_at: candidate.published_at,
     markdown,
     key_points: [
-      item.text ? stripTags(item.text).slice(0, 220) : "该来源以讨论和评论为主。",
+      item.text ? stripTags(item.text).slice(0, 220) : "This source mainly contains discussion threads and comments.",
       ...comments.slice(0, 2).map((comment) => `${comment.author}: ${comment.text.slice(0, 180)}`)
     ].filter(Boolean),
     sections: buildSectionsFromMarkdown(markdown),
@@ -2270,7 +3352,7 @@ async function readSegmentFaultSource(candidate) {
   const markdown = [
     `# ${candidate.title}`,
     "",
-    candidate.published_at ? `发布时间：${candidate.published_at}` : "",
+    candidate.published_at ? `鍙戝竷鏃堕棿锛?{candidate.published_at}` : "",
     candidate.summary,
     "",
     stripTags(articleHtml)
@@ -2300,8 +3382,8 @@ async function readITHomeSource(candidate) {
   const markdown = [
     `# ${candidate.title}`,
     "",
-    candidate.published_at ? `发布时间：${candidate.published_at}` : "",
-    descriptionMatch ? `摘要：${decodeHtmlEntities(descriptionMatch[1])}` : "",
+    candidate.published_at ? `鍙戝竷鏃堕棿锛?{candidate.published_at}` : "",
+    descriptionMatch ? `鎽樿锛?{decodeHtmlEntities(descriptionMatch[1])}` : "",
     "",
     stripTags(contentHtml)
   ].filter(Boolean).join("\n");
@@ -2333,7 +3415,7 @@ async function readArxivSource(candidate) {
       const abstract = abstractMatch ? abstractMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : candidate.summary;
       const authors = authorsMatch ? authorsMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : candidate.author;
       const history = historyMatch ? historyMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "";
-      const markdown = [`# ${candidate.title}`, "", `作者：${authors}`, candidate.published_at ? `发布时间：${candidate.published_at}` : "", history ? `提交历史：${history}` : "", "", abstract].filter(Boolean).join("\n");
+      const markdown = [`# ${candidate.title}`, "", `浣滆€咃細${authors}`, candidate.published_at ? `鍙戝竷鏃堕棿锛?{candidate.published_at}` : "", history ? `鎻愪氦鍘嗗彶锛?{history}` : "", "", abstract].filter(Boolean).join("\n");
       return {
         source_id: candidate.id,
         content_type: candidate.content_type || candidate.source_type,
@@ -2353,7 +3435,14 @@ async function readArxivSource(candidate) {
     }
   }
 
-  const markdown = [`# ${candidate.title}`, "", `作者：${candidate.author || "未知作者"}`, candidate.published_at ? `发布时间：${candidate.published_at}` : "", "", candidate.summary].filter(Boolean).join("\n");
+  const markdown = [
+    `# ${candidate.title}`,
+    "",
+    `Author: ${candidate.author || "Unknown"}`,
+    candidate.published_at ? `Published At: ${candidate.published_at}` : "",
+    "",
+    candidate.summary
+  ].filter(Boolean).join("\n");
   return {
     source_id: candidate.id,
     content_type: candidate.content_type || candidate.source_type,
@@ -2618,7 +3707,7 @@ function parseDouyinRenderedPage(payload) {
   }
 
   const bodyText = String(payload.bodyText || "");
-  if (/验证码中间页|请完成验证|验证后继续/.test(bodyText)) {
+  if (/(captcha|verification|complete verification)/i.test(bodyText)) {
     return null;
   }
 
@@ -2627,7 +3716,7 @@ function parseDouyinRenderedPage(payload) {
     .map((line) => normalizeWhitespace(line))
     .filter(Boolean);
 
-  const title = normalizeWhitespace((payload.heading || payload.title || "").replace(/\s*-\s*抖音$/, ""));
+  const title = normalizeWhitespace((payload.heading || payload.title || "").replace(/\s*-\s*鎶栭煶$/, ""));
   const publishedLine = lines.find((line) => /^发布时间[:：]/.test(line)) || "";
   const publishedAtLabel = publishedLine ? normalizeWhitespace(publishedLine.replace(/^发布时间[:：]\s*/, "")) : null;
   const publishedAt = formatDouyinPublishedAt(publishedAtLabel);
@@ -2637,7 +3726,7 @@ function parseDouyinRenderedPage(payload) {
   if (!author && publishedIndex !== -1) {
     for (let index = publishedIndex + 1; index < Math.min(lines.length, publishedIndex + 6); index += 1) {
       const line = lines[index];
-      if (!line || /^(粉丝|获赞|关注|推荐视频|举报|私信|点击加载更多)/.test(line)) {
+      if (!line || /^(绮変笣|鑾疯禐|鍏虫敞|鎺ㄨ崘瑙嗛|涓炬姤|绉佷俊|鐐瑰嚮鍔犺浇鏇村)/.test(line)) {
         continue;
       }
       author = line;
@@ -2649,12 +3738,12 @@ function parseDouyinRenderedPage(payload) {
   if (author && publishedIndex !== -1) {
     const authorIndex = lines.findIndex((line, index) => index > publishedIndex && line === author);
     if (authorIndex !== -1) {
-      authorStats = lines.slice(authorIndex + 1, authorIndex + 4).find((line) => /粉丝|获赞/.test(line)) || null;
+      authorStats = lines.slice(authorIndex + 1, authorIndex + 4).find((line) => /绮変笣|鑾疯禐/.test(line)) || null;
     }
   }
 
   const metrics = [];
-  const reportIndex = lines.findIndex((line) => line === "举报");
+  const reportIndex = lines.findIndex((line) => line === "涓炬姤");
   if (reportIndex !== -1) {
     for (let index = reportIndex - 1; index >= 0 && metrics.length < 4; index -= 1) {
       const line = lines[index];
@@ -2668,7 +3757,7 @@ function parseDouyinRenderedPage(payload) {
     }
   }
 
-  const chapterIndex = lines.findIndex((line) => line === "章节要点");
+  const chapterIndex = lines.findIndex((line) => line === "绔犺妭瑕佺偣");
   const timeline = [];
   if (chapterIndex !== -1) {
     for (let index = chapterIndex + 1; index < Math.min(lines.length, chapterIndex + 20); index += 1) {
@@ -2677,7 +3766,7 @@ function parseDouyinRenderedPage(payload) {
         continue;
       }
       const summary = lines[index + 1];
-      if (/^第\d+集/.test(summary) || summary === "下一章") {
+      if (/^第\d+集/.test(summary) || summary === "下一集") {
         continue;
       }
       timeline.push({
@@ -2690,7 +3779,7 @@ function parseDouyinRenderedPage(payload) {
   }
 
   const primaryVideo = (payload.videos || []).find((video) => video?.src) || (payload.videos || [])[0] || null;
-  const seriesTitle = (payload.subheadings || []).find((heading) => heading && heading !== "推荐视频") || null;
+  const seriesTitle = (payload.subheadings || []).find((heading) => heading && heading !== "鎺ㄨ崘瑙嗛") || null;
 
   return {
     title: title || null,
@@ -2720,12 +3809,12 @@ async function readBilibiliSource(candidate) {
   const stats = video.stat || {};
   const duration = timestampFromMilliseconds((video.duration || 0) * 1000);
   
-  // 尝试使用新的视频转文本功能
+  // Try enriching with transcription when available.
   let transcript = [];
   let timeline = [];
   let keyPoints = [
     description.slice(0, 220),
-    `作者 ${video.owner?.name || candidate.author}，播放 ${stats.view || 0}，点赞 ${stats.like || 0}，评论 ${stats.reply || 0}。`
+    `Author ${video.owner?.name || candidate.author || "Unknown"}, views ${stats.view || 0}, likes ${stats.like || 0}, comments ${stats.reply || 0}.`
   ].filter(Boolean);
   
   try {
@@ -2738,19 +3827,19 @@ async function readBilibiliSource(candidate) {
       }
     }
   } catch (error) {
-    console.warn(`Bilibili视频转文本失败: ${error.message}`);
+    console.warn(`Bilibili video transcription failed: ${error.message}`);
   }
   
   const markdown = [
     `# ${video.title || candidate.title}`,
     "",
-    `作者：${video.owner?.name || candidate.author || "Bilibili UP 主"}`,
-    formatUnixTimestamp(video.pubdate) ? `发布时间：${formatUnixTimestamp(video.pubdate)}` : "",
-    duration ? `时长：${duration}` : "",
+    `Author: ${video.owner?.name || candidate.author || "Bilibili Creator"}`,
+    formatUnixTimestamp(video.pubdate) ? `Published At: ${formatUnixTimestamp(video.pubdate)}` : "",
+    duration ? `Duration: ${duration}` : "",
     "",
     description,
     "",
-    `播放：${stats.view || 0}，点赞：${stats.like || 0}，评论：${stats.reply || 0}，收藏：${stats.favorite || 0}`
+    `鎾斁锛?{stats.view || 0}锛岀偣璧烇細${stats.like || 0}锛岃瘎璁猴細${stats.reply || 0}锛屾敹钘忥細${stats.favorite || 0}`
   ].filter(Boolean).join("\n");
 
   return {
@@ -2802,9 +3891,9 @@ async function readDouyinSource(candidate) {
           if (desc) {
             keyPoints.push([
               desc,
-              author ? `作者：${author}` : "",
-              plays ? `播放：${plays}` : "",
-              likes ? `点赞：${likes}` : ""
+              author ? `浣滆€咃細${author}` : "",
+              plays ? `鎾斁锛?{plays}` : "",
+              likes ? `鐐硅禐锛?{likes}` : ""
             ].filter(Boolean).join(" | "));
           }
         }
@@ -2817,8 +3906,8 @@ async function readDouyinSource(candidate) {
   markdown = [
     `# ${pageTitle}`,
     "",
-    "该来源当前以抖音站内搜索入口方式接入。",
-    `搜索链接：${candidate.url}`,
+    "This source is currently accessed via the Douyin in-site search landing flow.",
+    `Search URL: ${candidate.url}`,
     "",
     ...keyPoints
   ].filter(Boolean).join("\n");
@@ -2836,7 +3925,9 @@ async function readDouyinSource(candidate) {
     markdown,
     transcript: [],
     timeline: [],
-    key_points: keyPoints.length > 1 ? keyPoints : [candidate.summary, "当前接入方式是抖音站内搜索页，适合把用户带到中文短视频站点继续查看。"].filter(Boolean),
+    key_points: keyPoints.length > 1
+      ? keyPoints
+      : [candidate.summary, "Current access is via Douyin search landing pages; open the source for full context."].filter(Boolean),
     key_frames: [candidate.summary].filter(Boolean),
     facts: extractNumericFacts(markdown, candidate.id, "douyin_search")
   };
@@ -2956,7 +4047,7 @@ async function readDouyinSourceV2(candidate) {
         let timeline = parsed.timeline;
         let transcript = [];
         
-        // 尝试使用新的视频转文本功能
+        // Try enriching the result with video transcription.
         try {
           const transcribeResult = await transcribeVideo(detailUrl);
           if (transcribeResult.success) {
@@ -2969,7 +4060,7 @@ async function readDouyinSourceV2(candidate) {
             }
           }
         } catch (error) {
-          console.warn(`抖音视频转文本失败: ${error.message}`);
+          console.warn(`Douyin video transcription failed: ${error.message}`);
         }
         
         const markdown = [
@@ -3038,11 +4129,11 @@ async function readTedSource(candidate) {
     .filter((cue) => cue.text);
 
   const description = pageProps.description || candidate.summary;
-  const timeline = buildTranscriptTimeline(cues);
+  let timeline = buildTranscriptTimeline(cues);
   let transcript = cues;
   let keyPoints = [description ? description.slice(0, 220) : "TED talk"];
   
-  // 尝试使用新的视频转文本功能作为补充
+  // Try enriching with automatic video transcription.
   try {
     const transcribeResult = await transcribeVideo(candidate.url);
     if (transcribeResult.success) {
@@ -3057,7 +4148,7 @@ async function readTedSource(candidate) {
       }
     }
   } catch (error) {
-    console.warn(`TED视频转文本失败: ${error.message}`);
+    console.warn(`TED video transcription failed: ${error.message}`);
   }
   
   const transcriptText = transcript.map((cue) => `[${cue.start}] ${cue.text}`).join("\n");
@@ -3161,7 +4252,7 @@ async function executeReadTool(toolId, input) {
   return connector.read(candidate);
 }
 
-// 注册核心工具
+// 娉ㄥ唽鏍稿績宸ュ叿
 ToolRegistry.registerTool({
   id: 'layout_analysis',
   name: 'Layout Analysis',
@@ -3365,7 +4456,7 @@ ToolRegistry.registerTool({
   }
 });
 
-// 图文理解工具
+// 鍥炬枃鐞嗚В宸ュ叿
 ToolRegistry.registerTool({
   id: 'analyze_image',
   name: 'Analyze Image',
@@ -3405,7 +4496,7 @@ ToolRegistry.registerTool({
   async execute(input) {
     const { imageUrl, imagePath, question, analysisType = 'description' } = input;
     
-    // 模拟图像分析（实际项目中应集成真实的图像分析API）
+    // Mock image analysis output; replace with real provider integration as needed.
     return {
       success: true,
       data: {
@@ -3425,7 +4516,7 @@ ToolRegistry.registerTool({
   }
 });
 
-// 图文搜索工具
+// 鍥炬枃鎼滅储宸ュ叿
 ToolRegistry.registerTool({
   id: 'image_search',
   name: 'Image Search',
@@ -3459,7 +4550,7 @@ ToolRegistry.registerTool({
   async execute(input) {
     const { query, imageUrl, count = 5 } = input;
     
-    // 模拟图像搜索（实际项目中应集成真实的图像搜索API）
+    // Mock image-search output; replace with real provider integration as needed.
     return {
       success: true,
       data: {
@@ -3476,7 +4567,7 @@ ToolRegistry.registerTool({
   }
 });
 
-// 视频转文本工具
+// Video transcription tool
 ToolRegistry.registerTool({
   id: 'transcribe_video',
   name: 'Transcribe Video',
@@ -3525,7 +4616,7 @@ ToolRegistry.registerTool({
   }
 });
 
-// 搜索工具
+// 鎼滅储宸ュ叿
 ToolRegistry.registerTool({
   id: 'search_sources',
   name: 'Search Sources',
@@ -3559,6 +4650,104 @@ ToolRegistry.registerTool({
   }
 });
 
+// 娉ㄥ唽鎶栭煶瑙嗛涓嬭浇宸ュ叿
+ToolRegistry.registerTool({
+  id: 'download_douyin_video',
+  name: 'Douyin Video Downloader',
+  description: '涓嬭浇鎶栭煶瑙嗛锛堟棤姘村嵃锛夛紝鏀寔鍗曚釜瑙嗛涓嬭浇',
+  parameters: [
+    {
+      name: 'videoUrl',
+      type: 'string',
+      required: true,
+      description: '鎶栭煶瑙嗛閾炬帴锛屾敮鎸乿.douyin.com鐭摼鎺ュ拰瀹屾暣閾炬帴'
+    },
+    {
+      name: 'outputDir',
+      type: 'string',
+      required: false,
+      description: '涓嬭浇鐩綍锛岄粯璁や负./downloads'
+    },
+    {
+      name: 'filename',
+      type: 'string',
+      required: false,
+      description: '鑷畾涔夋枃浠跺悕锛岄粯璁や负浣滆€卂鏍囬_鏃堕棿鎴?mp4'
+    }
+  ],
+  execute: async (input) => {
+    const { videoUrl, outputDir, filename } = input;
+    if (!videoUrl) {
+      throw new Error('Missing required parameter: videoUrl');
+    }
+    const result = await downloadDouyinVideo(videoUrl, {
+      outputDir,
+      filename
+    });
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result.data;
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+// 娉ㄥ唽鎵归噺鎶栭煶瑙嗛涓嬭浇宸ュ叿
+ToolRegistry.registerTool({
+  id: 'batch_download_douyin_videos',
+  name: 'Batch Douyin Video Downloader',
+  description: '鎵归噺涓嬭浇鎶栭煶瑙嗛锛屾敮鎸佸苟鍙戞帶鍒跺拰寤惰繜璁剧疆',
+  parameters: [
+    {
+      name: 'videoUrls',
+      type: 'array',
+      required: true,
+      description: '鎶栭煶瑙嗛閾炬帴鏁扮粍'
+    },
+    {
+      name: 'outputDir',
+      type: 'string',
+      required: false,
+      description: '涓嬭浇鐩綍锛岄粯璁や负./downloads'
+    },
+    {
+      name: 'concurrency',
+      type: 'number',
+      required: false,
+      description: '骞跺彂鏁帮紝榛樿涓?'
+    },
+    {
+      name: 'delay',
+      type: 'number',
+      required: false,
+      description: '璇锋眰闂撮殧寤惰繜锛堟绉掞級锛岄粯璁や负2000'
+    }
+  ],
+  execute: async (input) => {
+    const { videoUrls, outputDir, concurrency, delay } = input;
+    if (!videoUrls || !Array.isArray(videoUrls) || videoUrls.length === 0) {
+      throw new Error('Missing required parameter: videoUrls (must be a non-empty array)');
+    }
+    const result = await batchDownloadDouyinVideos(videoUrls, {
+      outputDir,
+      concurrency,
+      delay
+    });
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result.data;
+  },
+  source: 'builtin',
+  status: 'active'
+});
+
+registerProductivityTools(ToolRegistry, {
+  captureRenderedPage,
+  findEdgeExecutable
+});
+
 module.exports = {
   samplePrompts,
   sourceCatalog,
@@ -3587,3 +4776,12 @@ module.exports = {
     parseDelimitedTable
   }
 };
+
+
+
+
+
+
+
+
+

@@ -690,10 +690,12 @@ async function runWebResearcher(plan, queries, telemetry, runtime = null) {
 }
 
 async function runSpecialistReads(selected, telemetry, runtime = null) {
-  const longTextCandidates = selected.filter((item) => routeCandidate(item) === "long_text_collector");
-  const videoCandidates = selected.filter((item) => routeCandidate(item) === "video_parser");
-  const chartCandidates = selected.filter((item) => routeCandidate(item) === "chart_parser");
-  const forumCandidates = selected.filter((item) => routeCandidate(item) === "fact_verifier");
+  const resolvedAgentForCandidate = (candidate) => candidate.preferred_agent || routeCandidate(candidate);
+  const resolvedToolForCandidate = (candidate) => candidate.preferred_tool || collectorToolForCandidate(candidate);
+  const longTextCandidates = selected.filter((item) => resolvedAgentForCandidate(item) === "long_text_collector");
+  const videoCandidates = selected.filter((item) => resolvedAgentForCandidate(item) === "video_parser");
+  const chartCandidates = selected.filter((item) => resolvedAgentForCandidate(item) === "chart_parser");
+  const forumCandidates = selected.filter((item) => resolvedAgentForCandidate(item) === "fact_verifier");
 
   async function readGroup(agent, candidates) {
     const startedAt = Date.now();
@@ -728,7 +730,7 @@ async function runSpecialistReads(selected, telemetry, runtime = null) {
           };
         }
 
-        const preferredToolId = collectorToolForCandidate(candidate);
+        const preferredToolId = resolvedToolForCandidate(candidate);
         const capability = collectorCapabilityForTask(agent, candidate);
         const toolResolution = telemetry?.agent_system?.resolveToolForTask
           ? telemetry.agent_system.resolveToolForTask({
@@ -777,7 +779,7 @@ async function runSpecialistReads(selected, telemetry, runtime = null) {
                 source_id: candidate.id,
                 segment_source_id: recovered.read.source_id,
                 agent,
-                tool: recovered.recovered_by || recovered.read.tool || collectorToolForCandidate(candidate),
+                tool: recovered.recovered_by || recovered.read.tool || resolvedToolForCandidate(candidate),
                 capability: collectorCapabilityForTask(agent, candidate),
                 pages: null,
                 objective: "Recovered after tool creation"

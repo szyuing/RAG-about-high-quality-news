@@ -8,6 +8,10 @@ function clamp01(value) {
   return Math.max(0, Math.min(1, value));
 }
 
+function unique(values) {
+  return Array.from(new Set((values || []).filter(Boolean)));
+}
+
 function buildEvaluationScorecard(plan, evaluation, verification, roundsCompleted, stopDecision = null) {
   const stopPolicy = plan?.stop_policy || {};
   const metrics = evaluation?.metrics || {};
@@ -83,13 +87,20 @@ function buildStopDecisionContext(plan, evidenceItems, verification, heuristicEv
   return {
     question: plan.task_goal,
     sub_questions: plan.sub_questions,
+    available_connectors: (plan.source_capabilities || []).map((item) => ({
+      id: item.id,
+      label: item.label,
+      capabilities: item.capabilities || []
+    })),
     stop_policy: plan.stop_policy,
     heuristic_evaluation: {
       is_sufficient: heuristicEvaluation.is_sufficient,
       resolved_questions: heuristicEvaluation.resolved_questions,
       missing_questions: heuristicEvaluation.missing_questions,
       risk_notes: heuristicEvaluation.risk_notes,
-      metrics: heuristicEvaluation.metrics
+      metrics: heuristicEvaluation.metrics,
+      follow_up_queries: heuristicEvaluation.follow_up_queries || [],
+      suggested_connector_ids: heuristicEvaluation.suggested_connector_ids || []
     },
     evaluation_scorecard: buildEvaluationScorecard(
       plan,
@@ -158,10 +169,29 @@ async function requestStopDecisionFromModel(plan, evidenceItems, verification, h
         minimum: 0,
         maximum: 1
       },
+      stop_reason: { type: "string" },
       missing_information: {
         type: "array",
         maxItems: 5,
         items: { type: "string" }
+      },
+      risk_notes: {
+        type: "array",
+        maxItems: 5,
+        items: { type: "string" }
+      },
+      follow_up_queries: {
+        type: "array",
+        maxItems: 5,
+        items: { type: "string" }
+      },
+      suggested_connector_ids: {
+        type: "array",
+        maxItems: 4,
+        items: {
+          type: "string",
+          enum: (plan.source_capabilities || []).map((item) => item.id)
+        }
       },
       reasoning: { type: "string" },
       recommended_action: {
@@ -174,7 +204,11 @@ async function requestStopDecisionFromModel(plan, evidenceItems, verification, h
       "can_answer_accurately",
       "answerability",
       "confidence",
+      "stop_reason",
       "missing_information",
+      "risk_notes",
+      "follow_up_queries",
+      "suggested_connector_ids",
       "reasoning",
       "recommended_action"
     ]
@@ -234,7 +268,9 @@ function mergeEvaluationWithStopDecision(heuristicEvaluation, stopDecision, roun
     };
   }
 
-  const llmSaysAccurate = Boolean(stopDecision.should_stop && stopDecision.can_answer_accurately);
+  const evidenceUnits = heuristicEvaluation.metrics?.evidence_units || 0;
+  const hasAnyEvidence = evidenceUnits > 0;
+  const llmSaysAccurate = Boolean(stopDecision.should_stop && stopDecision.can_answer_accurately && hasAnyEvidence);
   const atMaxRounds = roundsCompleted >= maxRounds;
   const shouldStopPartially = Boolean(
     stopDecision.should_stop
@@ -242,28 +278,43 @@ function mergeEvaluationWithStopDecision(heuristicEvaluation, stopDecision, roun
     && stopDecision.recommended_action === "stop_with_partial_answer"
   );
 
-  const nextBestAction = llmSaysAccurate
+  let nextBestAction = llmSaysAccurate
     ? "synthesize_answer"
-    : shouldStopPartially || atMaxRounds
-      ? "stop_with_partial_answer"
-      : "run_follow_up_search";
+    : stopDecision.recommended_action || heuristicEvaluation.next_best_action;
+
+  if (!hasAnyEvidence && nextBestAction === "synthesize_answer") {
+    nextBestAction = atMaxRounds ? "stop_with_partial_answer" : "run_follow_up_search";
+  }
+
+  if (shouldStopPartially || atMaxRounds) {
+    nextBestAction = llmSaysAccurate ? "synthesize_answer" : "stop_with_partial_answer";
+  }
+
+  const missingQuestions = llmSaysAccurate
+    ? []
+    : unique(stopDecision.missing_information?.length ? stopDecision.missing_information : heuristicEvaluation.missing_questions);
+
+  const riskNotes = unique([
+    ...(heuristicEvaluation.risk_notes || []),
+    ...(stopDecision.risk_notes || []),
+    ...(!llmSaysAccurate && stopDecision.reasoning ? [`LLM evaluator: ${stopDecision.reasoning}`] : [])
+  ]);
 
   return {
     ...heuristicEvaluation,
     is_sufficient: llmSaysAccurate,
+    missing_questions: missingQuestions,
     next_best_action: nextBestAction,
     reason: llmSaysAccurate
-      ? "llm evaluator confirmed the evidence is sufficient"
-      : heuristicEvaluation.reason,
-    risk_notes: [
-      ...new Set([
-        ...(heuristicEvaluation.risk_notes || []),
-        ...(!llmSaysAccurate && stopDecision.reasoning ? [`LLM evaluator: ${stopDecision.reasoning}`] : [])
-      ])
-    ],
+      ? (stopDecision.stop_reason || "llm evaluator confirmed the evidence is sufficient")
+      : (stopDecision.stop_reason || stopDecision.reasoning || heuristicEvaluation.reason),
+    risk_notes: riskNotes,
     evaluator_mode: "llm",
     stop_controller: "llm",
-    llm_stop_decision: stopDecision
+    llm_stop_decision: stopDecision,
+    follow_up_queries: unique(stopDecision.follow_up_queries || []),
+    suggested_connector_ids: unique(stopDecision.suggested_connector_ids || []).slice(0, 4),
+    answerability: stopDecision.answerability || null
   };
 }
 
@@ -358,7 +409,9 @@ function buildEmptyEvaluation(plan, roundsCompleted = 0) {
     },
     evaluator_mode: "fallback",
     stop_controller: "heuristic",
-    llm_stop_decision: null
+    llm_stop_decision: null,
+    follow_up_queries: [],
+    suggested_connector_ids: []
   };
 
   return finalizeEvaluation(plan, evaluation, { confirmations: [], conflicts: [], coverage_gaps: [] }, roundsCompleted, null);
