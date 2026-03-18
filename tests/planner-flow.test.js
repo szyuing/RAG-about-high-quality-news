@@ -287,6 +287,12 @@ test("synthesize should use llm-composed answer when available", async () => {
     );
 
     assert.equal(answer.quick_answer, "Sora improved, but evidence is still partly mixed.");
+    assert.equal(answer.schema_version, "final_answer.v1");
+    assert.ok(Array.isArray(answer.sources));
+    assert.ok(Array.isArray(answer.claims));
+    assert.equal(typeof answer.confidence, "number");
+    assert.ok(Array.isArray(answer.uncertainty));
+    assert.equal(answer.deep_research_summary.schema_version, "deep_research_summary.v1");
     assert.equal(answer.deep_research_summary.conclusion, "Available evidence suggests the update expanded capability, with some uncertainty remaining.");
     assert.equal(answer.deep_research_summary.confidence, 0.73);
     assert.equal(answer.deep_research_summary.llm_composer.key_claims[0].source_id, "src1");
@@ -553,6 +559,15 @@ test("deriveStopOutcome should normalize stop reason for the custom controller",
   assert.equal(stopState.should_stop_now, false);
   assert.equal(stopState.should_answer_now, true);
   assert.equal(stopState.reason, "max_rounds_reached");
+});
+
+test("buildEmptyEvaluation should include evaluation schema version", () => {
+  const evaluation = researchInternal.buildEmptyEvaluation({
+    sub_questions: ["one"],
+    stop_policy: { max_rounds: 2 }
+  }, 0);
+
+  assert.equal(evaluation.schema_version, "evaluation.v1");
 });
 
 test("buildFollowUpQueries should prefer llm supplied search suggestions", () => {

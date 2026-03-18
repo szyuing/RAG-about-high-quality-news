@@ -869,6 +869,34 @@ function formatFact(fact) {
   return fact.claim;
 }
 
+function buildStandardSources(evidenceItems) {
+  return (evidenceItems || []).slice(0, 8).map((item) => ({
+    source_id: item.source_id || null,
+    title: item.title || null,
+    source_type: item.source_type || null,
+    url: item.source_metadata?.url || null,
+    connector: item.source_metadata?.connector || null,
+    platform: item.source_metadata?.platform || null,
+    published_at: item.source_metadata?.published_at || null,
+    authority_score: item.source_metadata?.authority_score ?? null
+  }));
+}
+
+function buildStandardClaims(evidenceItems) {
+  return dedupeBy(
+    (evidenceItems || []).flatMap((item) => (item.claims || []).map((claim) => ({
+      source_id: claim.source_id || item.source_id || null,
+      type: claim.type || null,
+      claim: claim.claim || null,
+      subject: claim.subject || null,
+      value: claim.value ?? null,
+      unit: claim.unit || null,
+      confidence: claim.confidence ?? null
+    }))),
+    (item) => `${item.subject || "claim"}:${item.type || "statement"}:${item.claim || ""}:${item.source_id || ""}`
+  ).slice(0, 12);
+}
+
 function buildEphemeralToolGoal(question, candidate, failure) {
   const contentType = candidate.content_type || candidate.source_type || "web";
   return `Extract usable ${contentType} evidence for the research question "${question}" after the built-in ${failure.agent} read path failed.`;
@@ -997,12 +1025,30 @@ function buildHeuristicSynthesis(question, mode, candidates, reads, evidenceItem
     `Collected ${reads.length} normalized reads from ${candidates.length} candidate sources.`,
     keyClaims.length ? `Top supported claims: ${keyClaims.join(" | ")}` : "Structured support is still thin; qualitative evidence dominates."
   ].join(" ");
+  const uncertainty = evaluation.risk_notes.length
+    ? evaluation.risk_notes
+    : ["No major unresolved evidence gaps were detected."];
+  const confidence = (() => {
+    const baseScore = evaluation.is_sufficient ? 0.58 : 0.38;
+    const diversityBonus = Math.min(0.15, ((evaluation.metrics?.source_types_covered || 0) / 4) * 0.15);
+    const total = verification.confirmations.length + verification.conflicts.length + verification.coverage_gaps.length;
+    const confirmationBonus = total > 0 ? (verification.confirmations.length / total) * 0.2 : 0;
+    return Number(Math.min(0.94, baseScore + diversityBonus + confirmationBonus).toFixed(2));
+  })();
+  const sources = buildStandardSources(evidenceItems);
+  const claims = buildStandardClaims(evidenceItems);
 
   return {
+    schema_version: "final_answer.v1",
     mode,
     headline: `Research summary for "${question}"`,
     quick_answer: conclusion,
+    sources,
+    claims,
+    confidence,
+    uncertainty,
     deep_research_summary: {
+      schema_version: "deep_research_summary.v1",
       headline: `Research summary for "${question}"`,
       conclusion,
       key_sources: evidenceItems.slice(0, 4).map((item) => ({
@@ -1027,21 +1073,13 @@ function buildHeuristicSynthesis(question, mode, candidates, reads, evidenceItem
         reason: item.reason,
         competing_sources: item.comparison?.competing_sources || []
       })),
-      uncertainty: evaluation.risk_notes.length
-        ? evaluation.risk_notes
-        : ["No major unresolved evidence gaps were detected."],
+      uncertainty,
       evaluation_scorecard: evaluation.scorecard || null,
       stop_state: evaluation.stop_state || null,
       stop_decision: evaluation.llm_stop_decision || null,
       recommended_follow_ups: evaluation.follow_up_queries || [],
       suggested_connectors: evaluation.suggested_connector_ids || [],
-      confidence: (() => {
-        const baseScore = evaluation.is_sufficient ? 0.58 : 0.38;
-        const diversityBonus = Math.min(0.15, ((evaluation.metrics?.source_types_covered || 0) / 4) * 0.15);
-        const total = verification.confirmations.length + verification.conflicts.length + verification.coverage_gaps.length;
-        const confirmationBonus = total > 0 ? (verification.confirmations.length / total) * 0.2 : 0;
-        return Number(Math.min(0.94, baseScore + diversityBonus + confirmationBonus).toFixed(2));
-      })(),
+      confidence,
       dynamic_tools: telemetry.ephemeral_tools.map((item) => ({
         tool_id: item.tool.tool_id,
         strategy: item.tool.strategy,
@@ -1189,6 +1227,8 @@ async function synthesize(question, mode, candidates, reads, evidenceItems, veri
 
     return {
       ...fallback,
+      confidence: Number(modelAnswer.confidence.toFixed(2)),
+      uncertainty: compactStringList(modelAnswer.uncertainty, { minLength: 4, limit: 5 }),
       quick_answer: modelAnswer.quick_answer,
       deep_research_summary: {
         ...fallback.deep_research_summary,

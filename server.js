@@ -107,6 +107,44 @@ function normalizeMode(value) {
   throw new HttpError(400, "invalid_request", "mode must be either quick or deep");
 }
 
+function normalizeSearchProfile(value) {
+  if (value === undefined || value === null || value === "") {
+    return "quality";
+  }
+  if (value === "speed" || value === "balanced" || value === "quality") {
+    return value;
+  }
+  throw new HttpError(400, "invalid_request", "search_profile must be one of speed, balanced, quality");
+}
+
+function modeForSearchProfile(profile) {
+  if (profile === "speed") {
+    return "quick";
+  }
+  return "deep";
+}
+
+function resolveSearchExecution(input) {
+  const hasMode = input.mode !== undefined && input.mode !== null && input.mode !== "";
+  const rawProfile = input.search_profile ?? input.profile;
+  const hasProfile = rawProfile !== undefined && rawProfile !== null && rawProfile !== "";
+
+  if (hasMode) {
+    const mode = normalizeMode(input.mode);
+    const searchProfile = hasProfile
+      ? normalizeSearchProfile(rawProfile)
+      : (mode === "quick" ? "speed" : "quality");
+    return { mode, searchProfile, mode_source: "mode" };
+  }
+
+  const searchProfile = normalizeSearchProfile(rawProfile);
+  return {
+    mode: modeForSearchProfile(searchProfile),
+    searchProfile,
+    mode_source: "search_profile"
+  };
+}
+
 function validateArrayField(value, fieldName) {
   if (value === undefined) {
     return [];
@@ -157,6 +195,57 @@ function validateEphemeralToolInput(input) {
   };
 }
 
+function normalizeSearchResult(result, query, mode, searchProfile, modeSource = null) {
+  const evidence = Array.isArray(result?.evidence) ? result.evidence : [];
+  const citations = evidence
+    .slice(0, 10)
+    .map((item) => ({
+      source_id: item.source_id || null,
+      title: item.title || null,
+      url: item.source_metadata?.url || null,
+      connector: item.source_metadata?.connector || null,
+      platform: item.source_metadata?.platform || null,
+      published_at: item.source_metadata?.published_at || null,
+      snippet: (item.key_points || [])[0] || null
+    }));
+
+  const deepSummary = result?.final_answer?.deep_research_summary || {};
+  return {
+    response_schema_version: "search_response.v1",
+    schema_version: "search.v1",
+    query,
+    mode,
+    search_profile: searchProfile || null,
+    task_id: result?.task_id || null,
+    answer: result?.final_answer?.quick_answer || "",
+    summary: deepSummary.conclusion || "",
+    confidence: deepSummary.confidence ?? null,
+    uncertainty: Array.isArray(deepSummary.uncertainty) ? deepSummary.uncertainty : [],
+    citations,
+    stop_state: result?.evaluation?.stop_state || null,
+    diagnostics: {
+      rounds: Array.isArray(result?.rounds) ? result.rounds.length : 0,
+      evidence_units: evidence.length,
+      evaluator_mode: result?.evaluation?.evaluator_mode || null,
+      mode_source: modeSource
+    }
+  };
+}
+
+function normalizeResearchResponse(result) {
+  if (!isPlainObject(result)) {
+    return {
+      response_schema_version: "research_response.v1",
+      result
+    };
+  }
+
+  return {
+    response_schema_version: "research_response.v1",
+    ...result
+  };
+}
+
 function sendError(res, error, fallbackCode, fallbackMessage) {
   if (error instanceof HttpError) {
     sendJson(res, error.statusCode, {
@@ -198,6 +287,28 @@ function createServer(deps = {}) {
         experience_memory: getExperienceMemory(),
         tool_memory: getToolMemory(),
         tool_audit_recent: getToolAuditLog(20),
+        source_capabilities: getSourceCapabilities()
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/search/capabilities") {
+      sendJson(res, 200, {
+        schema_version: "search-capabilities.v1",
+        modes: ["quick", "deep"],
+        default_mode: "deep",
+        search_profiles: {
+          values: ["speed", "balanced", "quality"],
+          default: "quality",
+          mode_mapping: {
+            speed: "quick",
+            balanced: "deep",
+            quality: "deep"
+          }
+        },
+        limits: {
+          max_citations: 10
+        },
         source_capabilities: getSourceCapabilities()
       });
       return;
@@ -289,7 +400,7 @@ function createServer(deps = {}) {
         });
 
         if (!closed) {
-          sendSseEvent(res, "done", { type: "done", result });
+          sendSseEvent(res, "done", { type: "done", result: normalizeResearchResponse(result) });
           res.end();
         }
       } catch (error) {
@@ -317,9 +428,27 @@ function createServer(deps = {}) {
         const question = requireNonEmptyString(input.question, "question");
         const mode = normalizeMode(input.mode);
         const result = await runResearch({ question, mode });
-        sendJson(res, 200, result);
+        sendJson(res, 200, normalizeResearchResponse(result));
       } catch (error) {
         sendError(res, error, "research_failed", "Research failed");
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/search") {
+      try {
+        const input = await parseJsonBody(req);
+        if (!isPlainObject(input)) {
+          throw new HttpError(400, "invalid_request", "Request body must be a JSON object");
+        }
+
+        const query = requireNonEmptyString(input.query ?? input.question, "query");
+        const execution = resolveSearchExecution(input);
+        const mode = execution.mode;
+        const result = await runResearch({ question: query, mode });
+        sendJson(res, 200, normalizeSearchResult(result, query, mode, execution.searchProfile, execution.mode_source));
+      } catch (error) {
+        sendError(res, error, "search_failed", "Search failed");
       }
       return;
     }
@@ -347,6 +476,10 @@ module.exports = {
   HttpError,
   collectBody,
   createServer,
+  normalizeSearchProfile,
+  normalizeResearchResponse,
+  resolveSearchExecution,
+  normalizeSearchResult,
   parseJsonBody,
   sendJson,
   sendSseEvent

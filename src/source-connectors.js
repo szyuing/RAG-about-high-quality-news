@@ -8,6 +8,8 @@ const { verifyEvidenceUnits } = require("./fact-verifier");
 const { extractTextFromResponsePayload } = require("./openai-response");
 const { registerProductivityTools } = require("./productivity-tools");
 const { createToolRegistry } = require("./tool-registry-core");
+const { createConnectorRuntime } = require("./source-connectors-runtime");
+const { registerVideoTools } = require("./video-tooling");
 
 // Video processing configuration
 const VIDEO_PROCESSING_CONFIG = {
@@ -3197,66 +3199,18 @@ const connectorRegistry = [
   }
 ];
 
-const connectorMap = new Map(connectorRegistry.map((item) => [item.id, item]));
-sourceCatalog = connectorRegistry.map(({ search, read, ...item }) => item);
-
-function resolveDiscoverConnectors(connectorIds) {
-  const ids = Array.isArray(connectorIds) ? connectorIds.filter(Boolean) : [];
-  if (!ids.length) {
-    return connectorRegistry;
-  }
-  const idSet = new Set(ids);
-  return connectorRegistry.filter((connector) => idSet.has(connector.id));
-}
-
-async function invokeSourceTool(input) {
-  const action = input?.action || "discover";
-
-  if (action === "discover") {
-    const query = String(input?.query || "").trim();
-    const discoverConnectors = resolveDiscoverConnectors(input?.connector_ids);
-    const settled = await Promise.allSettled(discoverConnectors.map((connector) => connector.search(query)));
-
-    const queryTokens = buildQueryTokens(query);
-    const results = settled.flatMap((item) => (item.status === "fulfilled" ? item.value : []))
-      .map((candidate) => {
-        const blob = normalizeWhitespace(`${candidate.title} ${candidate.summary} ${candidate.url}`).toLowerCase();
-        const hits = queryTokens.filter((token) => blob.includes(token)).length;
-        const relevanceBoost = queryTokens.length ? hits / queryTokens.length : 0.2;
-        return normalizeCandidateMediaMetadata({
-          ...candidate,
-          score: Number((candidate.score + relevanceBoost * 0.35).toFixed(4)),
-          metadata: {
-            ...(candidate.metadata || {}),
-            query_hits: hits
-          }
-        });
-      })
-      .filter((candidate) => {
-        if (!queryTokens.length) {
-          return true;
-        }
-        return candidate.metadata.query_hits >= 1;
-      });
-
-    return dedupeCandidates(results).sort((left, right) => right.score - left.score);
-  }
-
-  if (action === "read") {
-    const candidate = input?.candidate;
-    const connector = connectorMap.get(candidate?.connector);
-    if (!connector?.read) {
-      throw new Error(`Unsupported connector: ${candidate?.connector}`);
-    }
-    return connector.read(candidate);
-  }
-
-  throw new Error(`Unsupported source tool action: ${action}`);
-}
-
-async function searchRealSources(query) {
-  return invokeSourceTool({ action: "discover", query });
-}
+const connectorRuntime = createConnectorRuntime({
+  connectorRegistry,
+  buildQueryTokens,
+  normalizeWhitespace,
+  normalizeCandidateMediaMetadata
+});
+const connectorMap = connectorRuntime.connectorMap;
+const resolveDiscoverConnectors = connectorRuntime.resolveDiscoverConnectors;
+const invokeSourceTool = connectorRuntime.invokeSourceTool;
+const searchRealSources = connectorRuntime.searchRealSources;
+const readCandidate = connectorRuntime.readCandidate;
+sourceCatalog = connectorRuntime.sourceCatalog;
 
 async function readWebSource(candidate) {
   const raw = await fetchText(toReaderUrl(candidate.url));
@@ -4174,10 +4128,6 @@ async function readTedSource(candidate) {
   };
 }
 
-async function readCandidate(candidate) {
-  return invokeSourceTool({ action: "read", candidate });
-}
-
 function inferConnectorIdFromUrl(url) {
   const hostname = hostFromUrl(url);
   if (/bilibili\.com$/.test(hostname)) return "bilibili";
@@ -4567,55 +4517,6 @@ ToolRegistry.registerTool({
   }
 });
 
-// Video transcription tool
-ToolRegistry.registerTool({
-  id: 'transcribe_video',
-  name: 'Transcribe Video',
-  description: 'Convert video to text using ARS API or open-source model. First converts video to MP3, then transcribes audio to text.',
-  parameters: [
-    {
-      name: 'videoUrl',
-      type: 'string',
-      required: true,
-      description: 'Video URL to transcribe'
-    },
-    {
-      name: 'method',
-      type: 'string',
-      required: false,
-      description: 'Transcription method: "auto" (default), "ars_api", or "open_source_model"',
-      default: 'auto'
-    }
-  ],
-  validate(input) {
-    if (!input?.videoUrl) {
-      throw new Error('videoUrl is required');
-    }
-  },
-  async execute(input) {
-    const { videoUrl, method = 'auto' } = input;
-    
-    const originalArsEnabled = VIDEO_PROCESSING_CONFIG.arsApi.enabled;
-    const originalOpenSourceEnabled = VIDEO_PROCESSING_CONFIG.openSourceModel.enabled;
-    
-    try {
-      if (method === 'ars_api') {
-        VIDEO_PROCESSING_CONFIG.arsApi.enabled = true;
-        VIDEO_PROCESSING_CONFIG.openSourceModel.enabled = false;
-      } else if (method === 'open_source_model') {
-        VIDEO_PROCESSING_CONFIG.arsApi.enabled = false;
-        VIDEO_PROCESSING_CONFIG.openSourceModel.enabled = true;
-      }
-      
-      const result = await transcribeVideo(videoUrl);
-      return result;
-    } finally {
-      VIDEO_PROCESSING_CONFIG.arsApi.enabled = originalArsEnabled;
-      VIDEO_PROCESSING_CONFIG.openSourceModel.enabled = originalOpenSourceEnabled;
-    }
-  }
-});
-
 // 鎼滅储宸ュ叿
 ToolRegistry.registerTool({
   id: 'search_sources',
@@ -4650,97 +4551,11 @@ ToolRegistry.registerTool({
   }
 });
 
-// 娉ㄥ唽鎶栭煶瑙嗛涓嬭浇宸ュ叿
-ToolRegistry.registerTool({
-  id: 'download_douyin_video',
-  name: 'Douyin Video Downloader',
-  description: '涓嬭浇鎶栭煶瑙嗛锛堟棤姘村嵃锛夛紝鏀寔鍗曚釜瑙嗛涓嬭浇',
-  parameters: [
-    {
-      name: 'videoUrl',
-      type: 'string',
-      required: true,
-      description: '鎶栭煶瑙嗛閾炬帴锛屾敮鎸乿.douyin.com鐭摼鎺ュ拰瀹屾暣閾炬帴'
-    },
-    {
-      name: 'outputDir',
-      type: 'string',
-      required: false,
-      description: '涓嬭浇鐩綍锛岄粯璁や负./downloads'
-    },
-    {
-      name: 'filename',
-      type: 'string',
-      required: false,
-      description: '鑷畾涔夋枃浠跺悕锛岄粯璁や负浣滆€卂鏍囬_鏃堕棿鎴?mp4'
-    }
-  ],
-  execute: async (input) => {
-    const { videoUrl, outputDir, filename } = input;
-    if (!videoUrl) {
-      throw new Error('Missing required parameter: videoUrl');
-    }
-    const result = await downloadDouyinVideo(videoUrl, {
-      outputDir,
-      filename
-    });
-    if (!result.success) {
-      throw new Error(result.error);
-    }
-    return result.data;
-  },
-  source: 'builtin',
-  status: 'active'
-});
-
-// 娉ㄥ唽鎵归噺鎶栭煶瑙嗛涓嬭浇宸ュ叿
-ToolRegistry.registerTool({
-  id: 'batch_download_douyin_videos',
-  name: 'Batch Douyin Video Downloader',
-  description: '鎵归噺涓嬭浇鎶栭煶瑙嗛锛屾敮鎸佸苟鍙戞帶鍒跺拰寤惰繜璁剧疆',
-  parameters: [
-    {
-      name: 'videoUrls',
-      type: 'array',
-      required: true,
-      description: '鎶栭煶瑙嗛閾炬帴鏁扮粍'
-    },
-    {
-      name: 'outputDir',
-      type: 'string',
-      required: false,
-      description: '涓嬭浇鐩綍锛岄粯璁や负./downloads'
-    },
-    {
-      name: 'concurrency',
-      type: 'number',
-      required: false,
-      description: '骞跺彂鏁帮紝榛樿涓?'
-    },
-    {
-      name: 'delay',
-      type: 'number',
-      required: false,
-      description: '璇锋眰闂撮殧寤惰繜锛堟绉掞級锛岄粯璁や负2000'
-    }
-  ],
-  execute: async (input) => {
-    const { videoUrls, outputDir, concurrency, delay } = input;
-    if (!videoUrls || !Array.isArray(videoUrls) || videoUrls.length === 0) {
-      throw new Error('Missing required parameter: videoUrls (must be a non-empty array)');
-    }
-    const result = await batchDownloadDouyinVideos(videoUrls, {
-      outputDir,
-      concurrency,
-      delay
-    });
-    if (!result.success) {
-      throw new Error(result.error);
-    }
-    return result.data;
-  },
-  source: 'builtin',
-  status: 'active'
+registerVideoTools(ToolRegistry, {
+  transcribeVideo,
+  downloadDouyinVideo,
+  batchDownloadDouyinVideos,
+  VIDEO_PROCESSING_CONFIG
 });
 
 registerProductivityTools(ToolRegistry, {

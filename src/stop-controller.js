@@ -366,6 +366,7 @@ function deriveStopOutcome(evaluation) {
 function finalizeEvaluation(plan, evaluation, verification, roundsCompleted, stopDecision = null) {
   const stopState = deriveStopOutcome(evaluation);
   return {
+    schema_version: "evaluation.v1",
     ...evaluation,
     scorecard: buildEvaluationScorecard(plan, evaluation, verification, roundsCompleted, stopDecision),
     stop_state: stopState
