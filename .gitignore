@@ -66,3 +66,7 @@ data/tool-platform-*.jsonl
 *.key
 *secret*
 *apikey*
+
+# Test artifacts
+test-downloads/_*.mp3
+tmp-tool-check.txt

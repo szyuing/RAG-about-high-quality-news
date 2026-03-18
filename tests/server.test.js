@@ -39,6 +39,10 @@ async function withServer(fn) {
     runResearch: async () => ({ ok: true }),
     getSamples: () => [],
     getExperienceMemory: () => [],
+    summarizeExperienceMemory: () => ({ schema_version: "experience-overview.v1", total_entries: 0 }),
+    listExperienceMemory: () => [],
+    setExperiencePinned: () => null,
+    clearExperienceMemory: () => ({ removed_count: 0, remaining_count: 0, entries: [] }),
     getToolMemory: () => ({}),
     getToolAuditLog: () => [{ type: "tool_execution", tool_id: "tool-1" }],
     getSourceCapabilities: () => [],
@@ -101,6 +105,7 @@ test("POST /api/research should return response schema version on success", asyn
     }),
     getSamples: () => [],
     getExperienceMemory: () => [],
+    summarizeExperienceMemory: () => ({ schema_version: "experience-overview.v1", total_entries: 0 }),
     getToolMemory: () => ({}),
     getToolAuditLog: () => [],
     getSourceCapabilities: () => [],
@@ -137,7 +142,15 @@ test("POST /api/search should return normalized answer with citations", async ()
   const server = createServer({
     runResearch: async () => ({
       task_id: "task_1",
-      rounds: [{}, {}],
+      plan: {
+        site_search_strategies: [
+          { site_name: "OpenAI", search_mode: "site_query", domain: "openai.com" }
+        ]
+      },
+      rounds: [
+        { executed_search_tasks: [{ query: "OpenAI Sora official update site:openai.com" }] },
+        {}
+      ],
       evidence: [
         {
           source_id: "source-1",
@@ -166,6 +179,7 @@ test("POST /api/search should return normalized answer with citations", async ()
     }),
     getSamples: () => [],
     getExperienceMemory: () => [],
+    summarizeExperienceMemory: () => ({ schema_version: "experience-overview.v1", total_entries: 0 }),
     getToolMemory: () => ({}),
     getToolAuditLog: () => [],
     getSourceCapabilities: () => [],
@@ -195,6 +209,8 @@ test("POST /api/search should return normalized answer with citations", async ()
     assert.equal(response.json.citations[0].url, "https://example.com/source-1");
     assert.equal(response.json.diagnostics.evidence_units, 1);
     assert.equal(response.json.diagnostics.mode_source, "mode");
+    assert.equal(response.json.diagnostics.site_search_strategy_count, 1);
+    assert.equal(response.json.diagnostics.executed_search_task_count, 1);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => {
       if (error) {
@@ -213,6 +229,7 @@ test("POST /api/search should map speed profile to quick mode", async () => {
       callInput = input;
       return {
         task_id: "task_profile",
+        plan: { site_search_strategies: [] },
         rounds: [],
         evidence: [],
         evaluation: { evaluator_mode: "fallback", stop_state: null },
@@ -315,6 +332,7 @@ test("GET /api/samples should include tool audit entries", async () => {
 
     assert.equal(response.statusCode, 200);
     assert.deepEqual(response.json.tool_audit_recent, [{ type: "tool_execution", tool_id: "tool-1" }]);
+    assert.equal(response.json.experience_overview.schema_version, "experience-overview.v1");
   });
 });
 
@@ -323,6 +341,10 @@ test("GET /api/search/capabilities should return supported modes and connectors"
     runResearch: async () => ({ ok: true }),
     getSamples: () => [],
     getExperienceMemory: () => [],
+    summarizeExperienceMemory: () => ({ schema_version: "experience-overview.v1", total_entries: 0 }),
+    listExperienceMemory: () => [],
+    setExperiencePinned: () => null,
+    clearExperienceMemory: () => ({ removed_count: 0, remaining_count: 0, entries: [] }),
     getToolMemory: () => ({}),
     getToolAuditLog: () => [],
     getSourceCapabilities: () => [
@@ -348,6 +370,152 @@ test("GET /api/search/capabilities should return supported modes and connectors"
     assert.equal(response.json.search_profiles.mode_mapping.speed, "quick");
     assert.equal(response.json.limits.max_citations, 10);
     assert.equal(response.json.source_capabilities[0].id, "bing_web");
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    }));
+  }
+});
+
+test("GET /api/experience should return filtered experience entries", async () => {
+  let receivedFilters = null;
+  const server = createServer({
+    runResearch: async () => ({ ok: true }),
+    getSamples: () => [],
+    getExperienceMemory: () => [],
+    summarizeExperienceMemory: (entries) => ({ schema_version: "experience-overview.v1", total_entries: entries.length }),
+    listExperienceMemory: (filters) => {
+      receivedFilters = filters;
+      return [{ question_key: "openai sora update", question: "OpenAI Sora update", pinned: true }];
+    },
+    setExperiencePinned: () => null,
+    clearExperienceMemory: () => ({ removed_count: 0, remaining_count: 0, entries: [] }),
+    getToolMemory: () => ({}),
+    getToolAuditLog: () => [],
+    getSourceCapabilities: () => [],
+    synthesizeTool: async () => ({ id: "tool-1" }),
+    runEphemeralTool: async () => ({ success: true })
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const response = await request(server, {
+      path: "/api/experience?query=Sora&pinned=true&connector_id=bing_web&limit=5",
+      method: "GET"
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json.schema_version, "experience-memory.v1");
+    assert.equal(response.json.total, 1);
+    assert.equal(response.json.overview.total_entries, 1);
+    assert.equal(receivedFilters.q, "Sora");
+    assert.equal(receivedFilters.pinned, true);
+    assert.equal(receivedFilters.connector_id, "bing_web");
+    assert.equal(receivedFilters.limit, 5);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    }));
+  }
+});
+
+test("POST /api/experience/pin should update entry pin state", async () => {
+  let callInput = null;
+  const server = createServer({
+    runResearch: async () => ({ ok: true }),
+    getSamples: () => [],
+    getExperienceMemory: () => [],
+    summarizeExperienceMemory: () => ({ schema_version: "experience-overview.v1", total_entries: 0 }),
+    listExperienceMemory: () => [],
+    setExperiencePinned: (questionKey, options) => {
+      callInput = { questionKey, options };
+      return {
+        question_key: questionKey,
+        question: "OpenAI Sora update",
+        pinned: options.pinned,
+        pin_note: options.pinNote
+      };
+    },
+    clearExperienceMemory: () => ({ removed_count: 0, remaining_count: 0, entries: [] }),
+    getToolMemory: () => ({}),
+    getToolAuditLog: () => [],
+    getSourceCapabilities: () => [],
+    synthesizeTool: async () => ({ id: "tool-1" }),
+    runEphemeralTool: async () => ({ success: true })
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const response = await request(server, {
+      path: "/api/experience/pin",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ question_key: "openai sora update", pinned: true, pin_note: "keep this" })
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json.schema_version, "experience-memory.v1");
+    assert.equal(callInput.questionKey, "openai sora update");
+    assert.equal(callInput.options.pinned, true);
+    assert.equal(callInput.options.pinNote, "keep this");
+    assert.equal(response.json.entry.pinned, true);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    }));
+  }
+});
+
+test("POST /api/experience/clear should support only_unpinned cleanup", async () => {
+  let callInput = null;
+  const server = createServer({
+    runResearch: async () => ({ ok: true }),
+    getSamples: () => [],
+    getExperienceMemory: () => [],
+    summarizeExperienceMemory: () => ({ schema_version: "experience-overview.v1", total_entries: 0 }),
+    listExperienceMemory: () => [],
+    setExperiencePinned: () => null,
+    clearExperienceMemory: (input) => {
+      callInput = input;
+      return { removed_count: 2, remaining_count: 1, entries: [{ question_key: "pinned one", pinned: true }] };
+    },
+    getToolMemory: () => ({}),
+    getToolAuditLog: () => [],
+    getSourceCapabilities: () => [],
+    synthesizeTool: async () => ({ id: "tool-1" }),
+    runEphemeralTool: async () => ({ success: true })
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const response = await request(server, {
+      path: "/api/experience/clear",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ only_unpinned: true })
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json.schema_version, "experience-memory.v1");
+    assert.equal(callInput.onlyUnpinned, true);
+    assert.equal(response.json.removed_count, 2);
+    assert.equal(response.json.remaining_count, 1);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => {
       if (error) {

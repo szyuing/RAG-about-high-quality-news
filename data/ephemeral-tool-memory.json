@@ -1,10 +1,10 @@
 {
-  "updated_at": "2026-03-17T12:03:12.478Z",
+  "updated_at": "2026-03-18T02:39:52.565Z",
   "site_patterns": [
     {
       "site_key": "unknown",
-      "attempts": 5,
-      "success_count": 5,
+      "attempts": 8,
+      "success_count": 8,
       "last_strategy": null,
       "last_failure": null
     }

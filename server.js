@@ -195,6 +195,66 @@ function validateEphemeralToolInput(input) {
   };
 }
 
+function parseOptionalBoolean(value, fieldName = "value") {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no"].includes(normalized)) {
+    return false;
+  }
+  throw new HttpError(400, "invalid_request", `${fieldName} must be a boolean`);
+}
+
+function normalizeExperienceListInput(searchParams) {
+  return {
+    q: String(searchParams.get("q") || searchParams.get("query") || "").trim(),
+    source_type: String(searchParams.get("source_type") || "").trim(),
+    connector_id: String(searchParams.get("connector_id") || "").trim(),
+    site: String(searchParams.get("site") || "").trim(),
+    pinned: parseOptionalBoolean(searchParams.get("pinned"), "pinned"),
+    limit: Math.max(1, Math.min(200, Number(searchParams.get("limit") || 50)))
+  };
+}
+
+function validateExperiencePinInput(input) {
+  if (!isPlainObject(input)) {
+    throw new HttpError(400, "invalid_request", "Request body must be a JSON object");
+  }
+
+  return {
+    question_key: requireNonEmptyString(input.question_key, "question_key"),
+    pinned: parseOptionalBoolean(input.pinned, "pinned") ?? true,
+    pin_note: input.pin_note === undefined ? "" : String(input.pin_note || "").trim()
+  };
+}
+
+function validateExperienceClearInput(input) {
+  if (!isPlainObject(input)) {
+    throw new HttpError(400, "invalid_request", "Request body must be a JSON object");
+  }
+
+  return {
+    question_key: input.question_key === undefined ? "" : String(input.question_key || "").trim(),
+    only_unpinned: parseOptionalBoolean(input.only_unpinned, "only_unpinned") ?? false
+  };
+}
+
+function normalizeExperienceResponse(entries, filters = {}) {
+  return {
+    schema_version: "experience-memory.v1",
+    filters,
+    total: entries.length,
+    entries
+  };
+}
+
 function normalizeSearchResult(result, query, mode, searchProfile, modeSource = null) {
   const evidence = Array.isArray(result?.evidence) ? result.evidence : [];
   const citations = evidence
@@ -210,6 +270,12 @@ function normalizeSearchResult(result, query, mode, searchProfile, modeSource = 
     }));
 
   const deepSummary = result?.final_answer?.deep_research_summary || {};
+  const siteStrategyCount = Array.isArray(result?.plan?.site_search_strategies)
+    ? result.plan.site_search_strategies.length
+    : 0;
+  const executedSearchTaskCount = Array.isArray(result?.rounds)
+    ? result.rounds.reduce((total, round) => total + (Array.isArray(round?.executed_search_tasks) ? round.executed_search_tasks.length : 0), 0)
+    : 0;
   return {
     response_schema_version: "search_response.v1",
     schema_version: "search.v1",
@@ -227,7 +293,9 @@ function normalizeSearchResult(result, query, mode, searchProfile, modeSource = 
       rounds: Array.isArray(result?.rounds) ? result.rounds.length : 0,
       evidence_units: evidence.length,
       evaluator_mode: result?.evaluation?.evaluator_mode || null,
-      mode_source: modeSource
+      mode_source: modeSource,
+      site_search_strategy_count: siteStrategyCount,
+      executed_search_task_count: executedSearchTaskCount
     }
   };
 }
@@ -266,6 +334,10 @@ function createServer(deps = {}) {
     runResearch = researchEngine.runResearch,
     getSamples = researchEngine.getSamples,
     getExperienceMemory = researchEngine.getExperienceMemory,
+    summarizeExperienceMemory = researchEngine.summarizeExperienceMemory,
+    listExperienceMemory = researchEngine.listExperienceMemory,
+    setExperiencePinned = researchEngine.setExperiencePinned,
+    clearExperienceMemory = researchEngine.clearExperienceMemory,
     getToolMemory = researchEngine.getToolMemory,
     getToolAuditLog = researchEngine.getToolAuditLog,
     getSourceCapabilities = researchEngine.getSourceCapabilities,
@@ -282,9 +354,11 @@ function createServer(deps = {}) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/samples") {
+      const experienceMemory = getExperienceMemory();
       sendJson(res, 200, {
         prompts: getSamples(),
-        experience_memory: getExperienceMemory(),
+        experience_memory: experienceMemory,
+        experience_overview: summarizeExperienceMemory(experienceMemory),
         tool_memory: getToolMemory(),
         tool_audit_recent: getToolAuditLog(20),
         source_capabilities: getSourceCapabilities()
@@ -311,6 +385,57 @@ function createServer(deps = {}) {
         },
         source_capabilities: getSourceCapabilities()
       });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/experience") {
+      try {
+        const filters = normalizeExperienceListInput(url.searchParams);
+        const entries = listExperienceMemory(filters);
+        sendJson(res, 200, {
+          ...normalizeExperienceResponse(entries, filters),
+          overview: summarizeExperienceMemory(entries)
+        });
+      } catch (error) {
+        sendError(res, error, "experience_list_failed", "Experience list failed");
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/experience/pin") {
+      try {
+        const input = validateExperiencePinInput(await parseJsonBody(req));
+        const entry = setExperiencePinned(input.question_key, {
+          pinned: input.pinned,
+          pinNote: input.pin_note
+        });
+        if (!entry) {
+          throw new HttpError(404, "not_found", "Experience entry not found");
+        }
+        sendJson(res, 200, {
+          schema_version: "experience-memory.v1",
+          entry
+        });
+      } catch (error) {
+        sendError(res, error, "experience_pin_failed", "Experience pin update failed");
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/experience/clear") {
+      try {
+        const input = validateExperienceClearInput(await parseJsonBody(req));
+        const result = clearExperienceMemory({
+          questionKey: input.question_key,
+          onlyUnpinned: input.only_unpinned
+        });
+        sendJson(res, 200, {
+          schema_version: "experience-memory.v1",
+          ...result
+        });
+      } catch (error) {
+        sendError(res, error, "experience_clear_failed", "Experience clear failed");
+      }
       return;
     }
 

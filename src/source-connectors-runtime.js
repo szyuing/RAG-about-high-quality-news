@@ -10,6 +10,35 @@ function dedupeCandidates(candidates) {
   return Array.from(map.values());
 }
 
+function hostFromUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const url = /^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`;
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch (error) {
+    const match = raw.match(/([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i);
+    return match ? match[1].toLowerCase().replace(/^www\./, "") : "";
+  }
+}
+
+function normalizeDomainList(items) {
+  return Array.from(new Set((items || []).map((item) => hostFromUrl(item)).filter(Boolean)));
+}
+
+function matchesPreferredDomain(candidate, preferredDomains) {
+  if (!preferredDomains.length) {
+    return false;
+  }
+  const hostname = hostFromUrl(candidate?.url || candidate?.metadata?.resolved_url || "");
+  if (!hostname) {
+    return false;
+  }
+  return preferredDomains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+}
+
 function createConnectorRuntime(config = {}) {
   const {
     connectorRegistry = [],
@@ -46,6 +75,7 @@ function createConnectorRuntime(config = {}) {
     if (action === "discover") {
       const query = String(input?.query || "").trim();
       const discoverConnectors = resolveDiscoverConnectors(input?.connector_ids);
+      const preferredDomains = normalizeDomainList(input?.preferred_domains);
       const settled = await Promise.allSettled(discoverConnectors.map((connector) => connector.search(query)));
 
       const queryTokens = buildQueryTokens(query);
@@ -54,12 +84,15 @@ function createConnectorRuntime(config = {}) {
           const blob = normalizeWhitespace(`${candidate.title} ${candidate.summary} ${candidate.url}`).toLowerCase();
           const hits = queryTokens.filter((token) => blob.includes(token)).length;
           const relevanceBoost = queryTokens.length ? hits / queryTokens.length : 0.2;
+          const preferredDomainMatch = matchesPreferredDomain(candidate, preferredDomains);
+          const preferredDomainBoost = preferredDomainMatch ? 0.18 : 0;
           return normalizeCandidateMediaMetadata({
             ...candidate,
-            score: Number((candidate.score + relevanceBoost * 0.35).toFixed(4)),
+            score: Number((candidate.score + relevanceBoost * 0.35 + preferredDomainBoost).toFixed(4)),
             metadata: {
               ...(candidate.metadata || {}),
-              query_hits: hits
+              query_hits: hits,
+              preferred_domain_match: preferredDomainMatch
             }
           });
         })

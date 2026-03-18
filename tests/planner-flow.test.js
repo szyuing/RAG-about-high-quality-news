@@ -47,6 +47,31 @@ test("normalizeModelConnectorIds should keep valid ids and fill from fallback", 
   assert.deepEqual(ids, ["douyin", "bilibili", "bing_web", "ted"]);
 });
 
+test("buildNextRoundConnectorIds should replace unhealthy connectors with healthy reserves", () => {
+  const ids = researchInternal.buildNextRoundConnectorIds(
+    {
+      chosen_connector_ids: ["douyin", "bing_web"],
+      source_capabilities: [
+        { id: "douyin" },
+        { id: "bilibili" },
+        { id: "bing_web" },
+        { id: "ted" }
+      ]
+    },
+    ["douyin", "bing_web"],
+    { suggested_connector_ids: ["douyin"] },
+    {
+      douyin: { healthy: false },
+      bing_web: { healthy: true },
+      bilibili: { healthy: true }
+    }
+  );
+
+  assert.ok(ids.includes("bing_web"));
+  assert.ok(ids.includes("bilibili"));
+  assert.ok(!ids.includes("douyin"));
+});
+
 test("getRelevantExperienceHints should extract boosted queries and source types from similar history", () => {
   const hints = researchInternal.getRelevantExperienceHints(
     "Sora current update",
@@ -65,15 +90,128 @@ test("getRelevantExperienceHints should extract boosted queries and source types
     ]
   );
 
-  assert.equal(hints.entries.length, 1);
-  assert.deepEqual(hints.boosted_source_types, ["video", "web"]);
+  assert.ok(hints.entries.length >= 1);
+  assert.equal(hints.entries[0].question, "OpenAI Sora current update");
+  assert.ok(hints.boosted_source_types.includes("video"));
+  assert.ok(hints.boosted_source_types.includes("web"));
   assert.ok(hints.boosted_queries.includes("OpenAI Sora official"));
+});
+
+test("getRelevantExperienceHints should prioritize learned connector patterns from strong history", () => {
+  const now = new Date().toISOString();
+  const hints = researchInternal.getRelevantExperienceHints(
+    "Sora update official video",
+    [
+      {
+        question: "OpenAI Sora current update",
+        created_at: now,
+        last_seen_at: now,
+        run_count: 3,
+        success_count: 3,
+        useful_queries: ["OpenAI Sora official", "OpenAI Sora launch video"],
+        useful_source_types: ["video", "web"],
+        learned_patterns: {
+          boosted_connector_ids: ["bilibili", "bing_web"],
+          avoided_connector_ids: ["hacker_news"],
+          follow_up_queries: ["OpenAI Sora release notes"],
+          promoted_sites: ["openai.com"]
+        },
+        metrics: {
+          quality_score: 0.92,
+          confidence: 0.88,
+          sufficiency: true
+        },
+        noisy_paths: ["duplicate clip results"]
+      },
+      {
+        question: "Apple benchmark",
+        useful_queries: ["iPhone benchmark"],
+        useful_source_types: ["document"],
+        learned_patterns: {
+          boosted_connector_ids: ["arxiv"]
+        },
+        metrics: {
+          quality_score: 0.2,
+          confidence: 0.2,
+          sufficiency: false
+        }
+      }
+    ]
+  );
+
+  assert.deepEqual(hints.boosted_connector_ids.slice(0, 2), ["bilibili", "bing_web"]);
+  assert.ok(hints.avoided_connector_ids.includes("hacker_news"));
+  assert.ok(hints.boosted_queries.includes("OpenAI Sora release notes"));
+  assert.ok(hints.promoted_sites.includes("openai.com"));
+});
+
+test("recordExperienceMemoryEntry should merge repeated questions instead of appending duplicates", () => {
+  const merged = researchInternal.recordExperienceMemoryEntry(
+    [
+      {
+        question: "OpenAI Sora update",
+        created_at: "2026-03-16T00:00:00.000Z",
+        last_seen_at: "2026-03-16T00:00:00.000Z",
+        run_count: 2,
+        success_count: 1,
+        useful_queries: ["OpenAI Sora official"],
+        useful_source_types: ["video"],
+        learned_patterns: {
+          boosted_connector_ids: ["bilibili"]
+        },
+        metrics: {
+          quality_score: 0.5,
+          confidence: 0.6,
+          sufficiency: true
+        },
+        noisy_paths: ["no candidate returned"]
+      }
+    ],
+    {
+      question: "OpenAI Sora update",
+      created_at: "2026-03-18T00:00:00.000Z",
+      last_seen_at: "2026-03-18T00:00:00.000Z",
+      run_count: 1,
+      success_count: 1,
+      useful_queries: ["OpenAI Sora current update"],
+      useful_source_types: ["web"],
+      learned_patterns: {
+        boosted_connector_ids: ["bing_web"],
+        follow_up_queries: ["OpenAI Sora release notes"]
+      },
+      metrics: {
+        quality_score: 0.9,
+        confidence: 0.8,
+        sufficiency: true
+      }
+    },
+    { limit: 30 }
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].run_count, 3);
+  assert.equal(merged[0].success_count, 2);
+  assert.equal(merged[0].last_seen_at, "2026-03-18T00:00:00.000Z");
+  assert.ok(merged[0].useful_queries.includes("OpenAI Sora official"));
+  assert.ok(merged[0].useful_queries.includes("OpenAI Sora current update"));
+  assert.ok(merged[0].learned_patterns.boosted_connector_ids.includes("bilibili"));
+  assert.ok(merged[0].learned_patterns.boosted_connector_ids.includes("bing_web"));
 });
 
 test("mergePlanWithModelSelection should replace chosen connectors with model order", () => {
   const basePlan = researchInternal.planner("美国总统特朗普 演讲视频");
   const merged = researchInternal.mergePlanWithModelSelection(basePlan, {
     chosen_connector_ids: ["douyin", "ted"],
+    site_search_strategies: [
+      {
+        site_name: "Douyin",
+        domain: "douyin.com",
+        connector_id: "douyin",
+        search_mode: "hybrid",
+        query_variants: ["特朗普 演讲 抖音", "Trump speech Douyin"],
+        rationale: "Use both in-site video search and web discovery."
+      }
+    ],
     rationale: "video-first",
     connector_reasons: [
       { id: "douyin", reason: "short-form Chinese clips" },
@@ -86,6 +224,8 @@ test("mergePlanWithModelSelection should replace chosen connectors with model or
   assert.ok(merged.chosen_connector_ids.includes("bing_web"));
   assert.equal(merged.preferred_connectors[0].id, "douyin");
   assert.equal(merged.preferred_connectors[0].reason, "short-form Chinese clips");
+  assert.equal(merged.site_search_strategies[0].search_mode, "hybrid");
+  assert.equal(merged.site_search_strategies[0].connector_id, "douyin");
 });
 
 test("buildPlan should fall back cleanly when OPENAI_API_KEY is absent", async () => {
@@ -125,6 +265,16 @@ test("buildPlan should merge llm-generated sub-questions and queries", async () 
                 required_evidence: ["Official update", "Independent confirmation"],
                 initial_queries: ["OpenAI Sora official update", "Sora independent review"],
                 chosen_connector_ids: ["bing_web", "ithome"],
+                site_search_strategies: [
+                  {
+                    site_name: "OpenAI",
+                    domain: "openai.com",
+                    connector_id: "bing_web",
+                    search_mode: "site_query",
+                    query_variants: ["OpenAI Sora official update", "Sora release notes"],
+                    rationale: "Official updates should be searched on the primary domain first."
+                  }
+                ],
                 rationale: "Prioritize official and current reporting.",
                 connector_reasons: [
                   { id: "bing_web", reason: "broad discovery" },
@@ -144,6 +294,8 @@ test("buildPlan should merge llm-generated sub-questions and queries", async () 
     assert.deepEqual(plan.sub_questions, ["What changed?", "Why does it matter?"]);
     assert.deepEqual(plan.initial_queries, ["OpenAI Sora official update", "Sora independent review"]);
     assert.equal(plan.stop_policy.expected_sub_questions, 2);
+    assert.equal(plan.site_search_strategies[0].domain, "openai.com");
+    assert.equal(plan.site_search_strategies[0].search_mode, "site_query");
   } finally {
     if (originalApiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
@@ -306,17 +458,164 @@ test("synthesize should use llm-composed answer when available", async () => {
   }
 });
 
+test("requestExperienceMemoryFromModel should return null when OPENAI_API_KEY is absent", async () => {
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+
+  try {
+    const result = await researchInternal.requestExperienceMemoryFromModel(
+      "Sora current update",
+      { question: "Sora current update" },
+      [],
+      null,
+      null
+    );
+    assert.equal(result, null);
+  } finally {
+    if (originalApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test("finalizeExperienceMemory should apply llm-curated memory output when available", async () => {
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalFetch = global.fetch;
+  process.env.OPENAI_API_KEY = "test-key";
+
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      output: [
+        {
+          type: "message",
+          content: [
+            {
+              type: "output_text",
+              text: JSON.stringify({
+                canonical_question: "OpenAI Sora release update",
+                memory_summary: "Prefer official release notes plus short-form video recaps for Sora updates.",
+                reusable_insights: ["Official release notes establish the baseline before secondary commentary."],
+                retrieval_tags: ["sora", "release", "official"],
+                useful_queries: ["OpenAI Sora release notes"],
+                useful_source_types: ["web", "video"],
+                boosted_connector_ids: ["bing_web", "bilibili"],
+                avoided_connector_ids: ["hacker_news"],
+                follow_up_queries: ["Sora launch recap video"],
+                promoted_sites: ["openai.com"],
+                noisy_patterns: ["duplicate clip results"],
+                merge_target_question_key: "openai sora current update",
+                merge_rationale: "Same recurring update-tracking task."
+              })
+            }
+          ]
+        }
+      ]
+    })
+  });
+
+  try {
+    const memory = await researchInternal.finalizeExperienceMemory(
+      "Sora current update",
+      {
+        sources_read: [{ connector: "bing_web", source_type: "web" }],
+        queries_tried: ["Sora current update"],
+        failure_paths: [],
+        agent_reports: [],
+        workspace: { timeline: [{ type: "round_completed" }] }
+      },
+      { chosen_connector_ids: ["bing_web"], sub_questions: [] },
+      {
+        is_sufficient: true,
+        follow_up_queries: [],
+        metrics: { source_types_covered: 1, evidence_items: 2 },
+        scorecard: { readiness: 0.8 }
+      },
+      { ephemeral_tools: [], failures: [] },
+      { confirmations: [{ key: "capability" }], conflicts: [], coverage_gaps: [] },
+      {
+        quick_answer: "Sora updated",
+        uncertainty: [],
+        deep_research_summary: { conclusion: "Capability expanded." }
+      },
+      [
+        {
+          question: "OpenAI Sora current update",
+          question_key: "openai sora current update",
+          useful_queries: ["OpenAI Sora official"],
+          useful_source_types: ["web"]
+        }
+      ]
+    );
+
+    assert.equal(memory.question, "OpenAI Sora release update");
+    assert.equal(memory.question_key, "openai sora current update");
+    assert.equal(memory.note, "Prefer official release notes plus short-form video recaps for Sora updates.");
+    assert.ok(memory.useful_queries.includes("OpenAI Sora release notes"));
+    assert.ok(memory.learned_patterns.boosted_connector_ids.includes("bilibili"));
+    assert.ok(memory.learned_patterns.avoided_connector_ids.includes("hacker_news"));
+    assert.ok(memory.llm_memory.retrieval_tags.includes("official"));
+    assert.equal(memory.llm_memory.mode, "llm");
+  } finally {
+    if (originalApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalApiKey;
+    }
+    global.fetch = originalFetch;
+  }
+});
+
+test("summarizeExperienceMemory should aggregate reusable overview fields", () => {
+  const summary = researchInternal.summarizeExperienceMemory([
+    {
+      question: "OpenAI Sora update",
+      run_count: 2,
+      success_count: 2,
+      useful_queries: ["OpenAI Sora official"],
+      useful_source_types: ["web", "video"],
+      learned_patterns: {
+        boosted_connector_ids: ["bing_web", "bilibili"],
+        promoted_sites: ["openai.com"]
+      },
+      noisy_paths: ["duplicate clip results"]
+    },
+    {
+      question: "Apple benchmark",
+      run_count: 1,
+      success_count: 0,
+      useful_queries: ["iPhone benchmark"],
+      useful_source_types: ["web"],
+      learned_patterns: {
+        boosted_connector_ids: ["bing_web"]
+      },
+      noisy_paths: ["paywalled benchmark table"]
+    }
+  ]);
+
+  assert.equal(summary.schema_version, "experience-overview.v1");
+  assert.equal(summary.total_entries, 2);
+  assert.deepEqual(summary.top_connectors.slice(0, 2), ["bing_web", "bilibili"]);
+  assert.ok(summary.recurring_gaps.includes("duplicate clip results"));
+});
+
 test("planner should include experience hints in connector and query planning", () => {
   const plan = researchInternal.planner("Sora current update", {
     entries: [{ question: "OpenAI Sora current update", relevance: 3 }],
     boosted_queries: ["OpenAI Sora official"],
     boosted_source_types: ["video"],
-    avoided_patterns: ["no candidate returned"]
+    avoided_patterns: ["no candidate returned"],
+    boosted_connector_ids: ["bilibili"],
+    avoided_connector_ids: ["hacker_news"]
   });
 
   assert.ok(plan.initial_queries.includes("OpenAI Sora official"));
   assert.ok(plan.experience_hints);
   assert.ok(Array.isArray(plan.experience_hints.boosted_source_types));
+  assert.ok(plan.preferred_connectors.some((item) => item.id === "bilibili"));
+  assert.ok(!plan.chosen_connector_ids.includes("hacker_news"));
 });
 
 test("requestStopDecisionFromModel should return null when OPENAI_API_KEY is absent", async () => {
@@ -467,6 +766,29 @@ test("updateQuestionStatus should sync evaluation coverage into the shared works
   assert.match(missing.updated_at, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test("appendTimelineEvent should preserve site-search task details in scratchpad timeline", () => {
+  const scratchpad = researchInternal.createScratchpad({
+    sub_questions: []
+  });
+
+  researchInternal.appendTimelineEvent(scratchpad, {
+    type: "site_search_strategy",
+    agent: "web_researcher",
+    search_tasks: [
+      {
+        site_name: "OpenAI",
+        search_mode: "site_query",
+        query: "OpenAI Sora official update site:openai.com",
+        connector_ids: ["bing_web"]
+      }
+    ]
+  });
+
+  assert.equal(scratchpad.workspace.timeline.length, 1);
+  assert.equal(scratchpad.workspace.timeline[0].type, "site_search_strategy");
+  assert.equal(scratchpad.workspace.timeline[0].search_tasks[0].site_name, "OpenAI");
+});
+
 test("mergeEvaluationWithStopDecision should let llm stop the loop when evidence is sufficient", () => {
   const merged = researchInternal.mergeEvaluationWithStopDecision(
     {
@@ -568,6 +890,51 @@ test("buildEmptyEvaluation should include evaluation schema version", () => {
   }, 0);
 
   assert.equal(evaluation.schema_version, "evaluation.v1");
+});
+
+test("updateConnectorHealthSnapshot should refresh health status per round", () => {
+  const telemetry = {
+    failures: [
+      { stage: "discover", reason: "search timeout" },
+      { stage: "collect", connector: "douyin", reason: "read failed" }
+    ],
+    connector_health: {}
+  };
+
+  researchInternal.updateConnectorHealthSnapshot(telemetry, ["douyin", "bing_web"], 2);
+
+  assert.equal(telemetry.connector_health.douyin.rounds_observed, 2);
+  assert.equal(telemetry.connector_health.douyin.failed_events, 2);
+  assert.equal(telemetry.connector_health.douyin.last_failure, "read failed");
+  assert.equal(telemetry.connector_health["bing_web"].failed_events, 1);
+  assert.equal(typeof telemetry.connector_health.douyin.updated_at, "string");
+});
+
+test("fetchOpenAIJsonWithRetry should retry after transient failures", async () => {
+  const originalFetch = global.fetch;
+  let calls = 0;
+  global.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      throw new Error("fetch failed");
+    }
+    return {
+      ok: true,
+      json: async () => ({ output: [{ type: "message", content: [{ type: "output_text", text: "{}" }] }] })
+    };
+  };
+
+  try {
+    const payload = await researchInternal.fetchOpenAIJsonWithRetry(
+      "test-key",
+      { model: "gpt-4o-mini", input: "hello" },
+      { operation: "test_retry", timeoutMs: 1000, maxAttempts: 2 }
+    );
+    assert.equal(calls, 2);
+    assert.ok(payload.output);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test("buildFollowUpQueries should prefer llm supplied search suggestions", () => {

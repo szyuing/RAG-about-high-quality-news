@@ -255,10 +255,16 @@ textarea:focus {
 .sample-header p,
 .meta-line,
 .memory-time,
+.memory-meta,
 .lead,
 .json-view,
 .empty-state {
   color: var(--muted);
+}
+
+.memory-meta {
+  margin: 0.2rem 0 0.55rem;
+  font-size: 0.88rem;
 }
 
 .badge {
@@ -368,6 +374,22 @@ textarea:focus {
   margin: 0;
   color: var(--muted);
   line-height: 1.55;
+}
+
+.search-chain-list {
+  display: grid;
+  gap: 8px;
+}
+
+.search-chain-card {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(29, 108, 107, 0.08);
+  border: 1px solid rgba(29, 108, 107, 0.12);
+}
+
+.search-chain-card p {
+  margin: 0;
 }
 
 .timeline-index {

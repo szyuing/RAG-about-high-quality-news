@@ -1,6 +1,7 @@
 const { invokeSourceTool, ToolRegistry } = require("./source-connectors");
 const { createEvidenceUnit, scoreQuestionCoverage } = require("./evidence-model");
 const { synthesizeTool, runEphemeralTool } = require("./ephemeral-tooling");
+const { buildBingSiteQueries } = require("./site-hints");
 const {
   dispatchAgentTask,
   completeAgentTask,
@@ -10,6 +11,81 @@ const {
   promoteToolCandidate
 } = require("./runtime");
 const { AgentType } = require("./agents");
+
+function normalizeSearchTaskKey(task) {
+  return [
+    task.query,
+    (task.connector_ids || []).join("|"),
+    (task.preferred_domains || []).join("|")
+  ].join("::");
+}
+
+function applySiteFilter(query, domain) {
+  const trimmed = String(query || "").trim();
+  const normalizedDomain = String(domain || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (!normalizedDomain || /\bsite:/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed} site:${normalizedDomain}`;
+}
+
+function buildSiteStrategyTasks(plan, queries) {
+  const strategies = plan.site_search_strategies || [];
+  if (!strategies.length) {
+    return [];
+  }
+
+  const defaultSeedQuery = String(queries[0] || "").trim();
+  const tasks = [];
+
+  for (const strategy of strategies) {
+    if (strategy.search_mode === "verify_only") {
+      continue;
+    }
+
+    const queryVariants = (strategy.query_variants || []).length
+      ? strategy.query_variants
+      : (defaultSeedQuery ? [defaultSeedQuery] : []);
+    const preferredDomains = strategy.domain ? [strategy.domain] : [];
+
+    if (strategy.search_mode === "connector_search" || strategy.search_mode === "hybrid") {
+      const connectorIds = strategy.connector_id
+        ? [strategy.connector_id]
+        : (plan.chosen_connector_ids || []);
+      for (const query of queryVariants.slice(0, 3)) {
+        tasks.push({
+          query,
+          connector_ids: connectorIds,
+          preferred_domains: preferredDomains,
+          site_strategy: strategy
+        });
+      }
+    }
+
+    if ((strategy.search_mode === "site_query" || strategy.search_mode === "hybrid") && strategy.domain) {
+      for (const query of queryVariants.slice(0, 3)) {
+        tasks.push({
+          query: applySiteFilter(query, strategy.domain),
+          connector_ids: ["bing_web"],
+          preferred_domains: preferredDomains,
+          site_strategy: strategy
+        });
+      }
+    }
+  }
+
+  const deduped = new Map();
+  for (const task of tasks) {
+    const key = normalizeSearchTaskKey(task);
+    if (!deduped.has(key)) {
+      deduped.set(key, task);
+    }
+  }
+  return Array.from(deduped.values()).slice(0, 8);
+}
 
 function dedupeBy(items, getKey) {
   const map = new Map();
@@ -246,6 +322,26 @@ function collectorCapabilityForTask(agent, candidate) {
   return "read_web_page";
 }
 
+function buildFallbackToolIds(agent, candidate, preferredToolId, capability = null) {
+  const contentType = String(candidate?.content_type || candidate?.source_type || "").toLowerCase();
+  const fallbackIds = [];
+
+  if (preferredToolId === "deep_read_page") {
+    fallbackIds.push("read_document_intel");
+  }
+  if (preferredToolId === "read_document_intel" && (agent === "chart_parser" || capability === "analyze_visual_document")) {
+    fallbackIds.push("analyze_document_multimodal");
+  }
+  if (preferredToolId === "analyze_document_multimodal") {
+    fallbackIds.push("read_document_intel");
+  }
+  if (preferredToolId === "extract_video_intel" && contentType === "video") {
+    fallbackIds.push("deep_read_page");
+  }
+
+  return Array.from(new Set(fallbackIds.filter((toolId) => toolId && toolId !== preferredToolId)));
+}
+
 function mergeUniqueStrings(values, limit = 6) {
   return Array.from(new Set((values || []).filter(Boolean))).slice(0, limit);
 }
@@ -451,9 +547,16 @@ async function runDocumentParsingTasks(candidate, telemetry, runtime, parentTask
     try {
       let taskToolData = null;
       if (toolId && toolId !== "read_document_intel") {
-        const execution = await ToolRegistry.executeTool(toolId, buildDocumentTaskToolInput(candidate, baseRead, task));
+        const execution = await ToolRegistry.executeTool(toolId, buildDocumentTaskToolInput(candidate, baseRead, task), {
+          agent: task.agent,
+          capability: task.capability,
+          candidate,
+          fallbackToolIds: buildFallbackToolIds(task.agent, candidate, toolId, task.capability)
+        });
         if (!execution.success) {
-          throw new Error(execution.error?.message || `${toolId} failed`);
+          const toolError = new Error(execution.error?.message || `${toolId} failed`);
+          toolError.execution = execution;
+          throw toolError;
         }
         taskToolData = execution.data;
       }
@@ -638,6 +741,8 @@ function evaluateResearch(plan, scratchpad, evidenceUnits, verification, roundsC
 
 async function runWebResearcher(plan, queries, telemetry, runtime = null) {
   const startedAt = Date.now();
+  const preferredDomains = Array.from(new Set((plan.search_site_hints?.domains || []).filter(Boolean)));
+  const siteStrategyTasks = buildSiteStrategyTasks(plan, queries);
   const queryReports = await Promise.all(queries.map(async (query) => {
     const runtimeTask = runtime
       ? dispatchAgentTask(runtime, {
@@ -652,7 +757,8 @@ async function runWebResearcher(plan, queries, telemetry, runtime = null) {
       const candidates = await invokeSourceTool({
         action: "discover",
         query,
-        connector_ids: plan.chosen_connector_ids
+        connector_ids: plan.chosen_connector_ids,
+        preferred_domains: preferredDomains
       });
       if (runtimeTask) {
         completeAgentTask(runtime, runtimeTask.id, {
@@ -669,7 +775,29 @@ async function runWebResearcher(plan, queries, telemetry, runtime = null) {
     }
   }));
 
-  const failures = queryReports.filter((item) => item.error);
+  const fallbackSiteTasks = siteStrategyTasks.length
+    ? []
+    : buildBingSiteQueries(queries, plan.search_site_hints, 4).map((query) => ({
+        query,
+        connector_ids: ["bing_web"],
+        preferred_domains: preferredDomains,
+        site_hint_query: true
+      }));
+  const siteHintReports = await Promise.all([...siteStrategyTasks, ...fallbackSiteTasks].map(async (task) => {
+    try {
+      const candidates = await invokeSourceTool({
+        action: "discover",
+        query: task.query,
+        connector_ids: task.connector_ids,
+        preferred_domains: task.preferred_domains?.length ? task.preferred_domains : preferredDomains
+      });
+      return { query: task.query, candidates, error: null, site_hint_query: true, site_strategy: task.site_strategy || null };
+    } catch (error) {
+      return { query: task.query, candidates: [], error, site_hint_query: true, site_strategy: task.site_strategy || null };
+    }
+  }));
+
+  const failures = [...queryReports, ...siteHintReports].filter((item) => item.error);
   for (const failure of failures) {
     telemetry.failures.push({
       stage: "discover",
@@ -682,11 +810,37 @@ async function runWebResearcher(plan, queries, telemetry, runtime = null) {
     stage: "web_researcher",
     duration_ms: Date.now() - startedAt,
     query_count: queries.length,
-    result_count: queryReports.reduce((total, item) => total + item.candidates.length, 0)
+    site_hint_query_count: [...siteStrategyTasks, ...fallbackSiteTasks].length,
+    result_count: [...queryReports, ...siteHintReports].reduce((total, item) => total + item.candidates.length, 0)
   });
 
-  return dedupeBy(queryReports.flatMap((item) => item.candidates), (item) => item.url)
-    .sort((left, right) => right.score - left.score);
+  const executedSearchTasks = [
+    ...queries.map((query) => ({
+      query,
+      connector_ids: plan.chosen_connector_ids,
+      preferred_domains: preferredDomains,
+      search_origin: "base_query",
+      search_mode: "connector_search",
+      site_name: null,
+      domain: null
+    })),
+    ...[...siteStrategyTasks, ...fallbackSiteTasks].map((task) => ({
+      query: task.query,
+      connector_ids: task.connector_ids,
+      preferred_domains: task.preferred_domains?.length ? task.preferred_domains : preferredDomains,
+      search_origin: task.site_strategy ? "llm_site_strategy" : "fallback_site_hint",
+      search_mode: task.site_strategy?.search_mode || "site_query",
+      site_name: task.site_strategy?.site_name || null,
+      domain: task.site_strategy?.domain || task.preferred_domains?.[0] || null,
+      rationale: task.site_strategy?.rationale || null
+    }))
+  ];
+
+  return {
+    candidates: dedupeBy([...queryReports, ...siteHintReports].flatMap((item) => item.candidates), (item) => item.url)
+      .sort((left, right) => right.score - left.score),
+    executed_search_tasks: executedSearchTasks
+  };
 }
 
 async function runSpecialistReads(selected, telemetry, runtime = null) {
@@ -741,15 +895,24 @@ async function runSpecialistReads(selected, telemetry, runtime = null) {
             })
           : null;
         const toolId = toolResolution?.tool_id || preferredToolId;
-        const execution = await ToolRegistry.executeTool(toolId, { candidate });
+        const execution = await ToolRegistry.executeTool(toolId, { candidate }, {
+          agent,
+          capability,
+          candidate,
+          fallbackToolIds: buildFallbackToolIds(agent, candidate, toolId, capability)
+        });
         if (!execution.success) {
-          throw new Error(execution.error?.message || `${toolId} failed`);
+          const toolError = new Error(execution.error?.message || `${toolId} failed`);
+          toolError.execution = execution;
+          throw toolError;
         }
         if (runtimeTask) {
           completeAgentTask(runtime, runtimeTask.id, {
             source_id: candidate.id,
-            tool: toolId,
-            capability
+            tool: execution.toolId || toolId,
+            capability,
+            retries_used: execution.meta?.attempts?.length || 0,
+            fallback_used: execution.meta?.fallback_used || false
           });
         }
         return {
@@ -760,7 +923,7 @@ async function runSpecialistReads(selected, telemetry, runtime = null) {
             source_id: candidate.id,
             segment_source_id: execution.data.source_id,
             agent,
-            tool: toolId,
+            tool: execution.toolId || toolId,
             capability,
             pages: null,
             objective: null
@@ -799,7 +962,10 @@ async function runSpecialistReads(selected, telemetry, runtime = null) {
 
         if (runtimeTask) {
           failAgentTask(runtime, runtimeTask.id, error, {
-            source_id: candidate.id
+            source_id: candidate.id,
+            error_type: error.execution?.error?.type || error.execution?.meta?.final_error_type || null,
+            attempts: error.execution?.meta?.attempts?.length || 0,
+            fallback_chain: error.execution?.meta?.fallback_chain || []
           });
         }
         return { candidate, read: null, error };
@@ -922,5 +1088,9 @@ module.exports = {
   evaluateResearch,
   runWebResearcher,
   runSpecialistReads,
-  runFactVerifierReview
+  runFactVerifierReview,
+  __internal: {
+    buildSiteStrategyTasks,
+    applySiteFilter
+  }
 };

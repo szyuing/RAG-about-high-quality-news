@@ -1,5 +1,6 @@
 const state = {
   memory: [],
+  experienceOverview: null,
   connectorLabels: {},
   activeStream: null,
   liveRounds: [],
@@ -64,6 +65,115 @@ function displayConnector(value) {
   return state.connectorLabels[value] || value || "Unknown connector";
 }
 
+function summarizeSiteStrategy(strategy) {
+  if (!strategy) {
+    return "n/a";
+  }
+  const site = strategy.site_name || strategy.domain || "site";
+  const mode = strategy.search_mode || "unknown";
+  const connector = strategy.connector_id ? displayConnector(strategy.connector_id) : null;
+  const parts = [site, mode];
+  if (connector) {
+    parts.push(connector);
+  }
+  if (strategy.domain) {
+    parts.push(strategy.domain);
+  }
+  return parts.join(" / ");
+}
+
+function summarizeExecutedSearchTask(task) {
+  if (!task) {
+    return "n/a";
+  }
+  const connectors = (task.connector_ids || []).map(displayConnector).join(", ") || "none";
+  const prefix = task.site_name
+    ? `${task.site_name} [${task.search_mode || "unknown"}]`
+    : `${task.search_origin || "search"} [${task.search_mode || "connector_search"}]`;
+  return `${prefix}: ${task.query} -> ${connectors}`;
+}
+
+function summarizeScratchpadTimelineItem(item) {
+  if (!item) {
+    return "";
+  }
+  if (item.type === "site_search_strategy") {
+    return (item.search_tasks || []).map(summarizeExecutedSearchTask).join(" | ") || "none";
+  }
+  if (Array.isArray(item.queries) && item.queries.length) {
+    return item.queries.join(" | ");
+  }
+  if (Array.isArray(item.selected_sources) && item.selected_sources.length) {
+    return item.selected_sources.join(" | ");
+  }
+  if (typeof item.evidence_items === "number") {
+    return String(item.evidence_items);
+  }
+  return "";
+}
+
+function normalizeHost(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const url = /^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`;
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch (_) {
+    const match = raw.match(/([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i);
+    return match ? match[1].toLowerCase().replace(/^www\./, "") : "";
+  }
+}
+
+function sourceMatchesSearchTask(source, task) {
+  if (!source || !task) {
+    return false;
+  }
+  const sourceConnector = source.connector || "";
+  const taskConnectors = task.connector_ids || [];
+  const sourceHost = normalizeHost(source.url || "");
+  const taskDomain = normalizeHost(task.domain || (task.preferred_domains || [])[0] || "");
+  if (taskConnectors.length && taskConnectors.includes(sourceConnector)) {
+    if (!taskDomain) {
+      return true;
+    }
+    return sourceHost === taskDomain || sourceHost.endsWith(`.${taskDomain}`);
+  }
+  if (taskDomain) {
+    return sourceHost === taskDomain || sourceHost.endsWith(`.${taskDomain}`);
+  }
+  return false;
+}
+
+function buildSearchExecutionChains(round) {
+  const tasks = round?.executed_search_tasks || [];
+  const sources = round?.selected_sources || [];
+  return tasks.map((task) => ({
+    task,
+    matched_sources: sources.filter((source) => sourceMatchesSearchTask(source, task))
+  }));
+}
+
+function renderSearchExecutionChains(round) {
+  const chains = buildSearchExecutionChains(round);
+  if (!chains.length) {
+    return '<p><strong>Decision chain:</strong> none</p>';
+  }
+  return `
+    <div class="search-chain-list">
+      ${chains.map(({ task, matched_sources }) => `
+        <section class="search-chain-card">
+          <p><strong>Decision:</strong> ${escapeHtml(summarizeExecutedSearchTask(task))}</p>
+          <p><strong>Hits:</strong> ${matched_sources.length
+            ? matched_sources.map((item) => escapeHtml(`${item.title} (${displayConnector(item.connector)})`)).join(" | ")
+            : "no selected source yet"}</p>
+        </section>
+      `).join("")}
+    </div>
+  `;
+}
+
 function setRunButtonIdle() {
   const button = document.getElementById("runButton");
   button.disabled = false;
@@ -118,6 +228,46 @@ function renderCapabilities(capabilities) {
   `).join("");
 }
 
+function renderTagGroup(values, prefix = "") {
+  return (values || []).map((item) => `<span>${escapeHtml(`${prefix}${item}`)}</span>`).join("");
+}
+
+function renderExperienceOverview(overview) {
+  const container = document.getElementById("memoryOverview");
+  if (!overview || !overview.total_entries) {
+    container.className = "memory-overview empty-state";
+    container.textContent = "No LLM memory overview yet.";
+    return;
+  }
+
+  const cards = [
+    {
+      title: "Memory stats",
+      body: `entries ${overview.total_entries} · pinned ${overview.pinned_entries || 0} · success ${Math.round((overview.run_success_rate || 0) * 100)}%`
+    },
+    {
+      title: "Top queries",
+      body: (overview.top_queries || []).join(" · ") || "none"
+    },
+    {
+      title: "Top connectors",
+      body: (overview.top_connectors || []).map((item) => displayConnector(item)).join(" · ") || "none"
+    },
+    {
+      title: "Recurring gaps",
+      body: (overview.recurring_gaps || []).join(" · ") || "none"
+    }
+  ];
+
+  container.className = "memory-overview";
+  container.innerHTML = cards.map((item) => `
+    <article class="memory-overview-card">
+      <p class="memory-overview-title">${escapeHtml(item.title)}</p>
+      <p>${escapeHtml(item.body)}</p>
+    </article>
+  `).join("");
+}
+
 function renderMemory(entries) {
   const container = document.getElementById("memoryOutput");
   if (!entries.length) {
@@ -131,10 +281,40 @@ function renderMemory(entries) {
     <article class="memory-card">
       <p class="memory-time">${escapeHtml(new Date(entry.created_at).toLocaleString())}</p>
       <h4>${escapeHtml(entry.question)}</h4>
-      <p>${escapeHtml(entry.note || "")}</p>
-      <div class="memory-tags">
-        ${(entry.useful_source_types || []).map((item) => `<span>${escapeHtml(displaySourceType(item))}</span>`).join("")}
+      <div class="memory-card-topline">
+        ${entry.pinned ? `<span class="memory-flag">Pinned</span>` : ""}
+        ${entry.llm_memory?.mode ? `<span class="memory-flag memory-flag-muted">${escapeHtml(entry.llm_memory.mode.toUpperCase())}</span>` : ""}
       </div>
+      <p class="memory-meta">${escapeHtml(`命中 ${entry.run_count || 1} 次 · 质量 ${Math.round(((entry.metrics?.quality_score || 0) * 100))}% · 置信 ${Math.round(((entry.metrics?.confidence || 0) * 100))}%`)}</p>
+      <p>${escapeHtml(entry.note || "")}</p>
+      ${entry.llm_memory?.reusable_insights?.length ? `
+        <div class="memory-block">
+          <strong>Reusable insights</strong>
+          <ul class="tight-list">
+            ${entry.llm_memory.reusable_insights.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+          </ul>
+        </div>
+      ` : ""}
+      ${entry.llm_memory?.merge_rationale ? `
+        <div class="memory-block">
+          <strong>Merge rationale</strong>
+          <p>${escapeHtml(entry.llm_memory.merge_rationale)}</p>
+        </div>
+      ` : ""}
+      <div class="memory-tags">
+        ${[
+          ...(entry.useful_source_types || []).map((item) => displaySourceType(item)),
+          ...((entry.learned_patterns?.boosted_connector_ids || []).map((item) => `connector:${item}`)),
+          ...((entry.learned_patterns?.promoted_sites || []).map((item) => `site:${item}`)),
+          ...((entry.llm_memory?.retrieval_tags || []).map((item) => `tag:${item}`))
+        ].slice(0, 6).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+      </div>
+      ${(entry.learned_patterns?.follow_up_queries || []).length ? `
+        <div class="memory-block">
+          <strong>Follow-up</strong>
+          <div class="memory-tags">${renderTagGroup(entry.learned_patterns.follow_up_queries)}</div>
+        </div>
+      ` : ""}
     </article>
   `).join("");
 }
@@ -225,6 +405,9 @@ function renderRounds(rounds) {
       <div class="timeline-body">
         <h4>Round ${round.round}</h4>
         <p><strong>Queries:</strong> ${(round.queries || []).map(escapeHtml).join(" / ")}</p>
+        <p><strong>Site strategies:</strong> ${(round.site_search_strategies || []).map((item) => escapeHtml(summarizeSiteStrategy(item))).join(" | ") || "none"}</p>
+        <p><strong>Executed searches:</strong> ${(round.executed_search_tasks || []).map((item) => escapeHtml(summarizeExecutedSearchTask(item))).join(" | ") || "none"}</p>
+        ${renderSearchExecutionChains(round)}
         <p><strong>Sources:</strong> ${(round.selected_sources || []).map((item) => `${escapeHtml(item.title)} (${escapeHtml(displayConnector(item.connector))} / ${escapeHtml(displaySourceType(item.content_type || item.source_type))})`).join(" | ") || "none"}</p>
         <p><strong>Collector layer:</strong> video ${escapeHtml(String(round.agent_reports?.collector_layer?.video_parser || 0))} | long text ${escapeHtml(String(round.agent_reports?.collector_layer?.long_text_collector || 0))} | chart ${escapeHtml(String(round.agent_reports?.collector_layer?.chart_parser || 0))} | table ${escapeHtml(String(round.agent_reports?.collector_layer?.table_parser || 0))}</p>
         <p><strong>Routed tasks:</strong> ${(round.routed_tasks || []).map((item) => `${escapeHtml(displayAgent(item.agent))} -> ${escapeHtml(displayTool(item.tool))}`).join(" | ") || "none"}</p>
@@ -327,7 +510,14 @@ function renderScratchpadTimeline(scratchpad) {
         <h4>${escapeHtml(item.type || "event")}</h4>
         <p><strong>At:</strong> ${escapeHtml(item.at || "")}</p>
         <p><strong>Agent:</strong> ${escapeHtml(item.agent || "system")}</p>
-        <p><strong>Detail:</strong> ${escapeHtml(item.queries?.join(" | ") || item.selected_sources?.join(" | ") || String(item.evidence_items || ""))}</p>
+        <p><strong>Detail:</strong> ${escapeHtml(summarizeScratchpadTimelineItem(item))}</p>
+        ${item.type === "site_search_strategy"
+          ? `<div class="search-chain-list">${(item.search_tasks || []).map((task) => `
+              <section class="search-chain-card">
+                <p><strong>Decision:</strong> ${escapeHtml(summarizeExecutedSearchTask(task))}</p>
+              </section>
+            `).join("")}</div>`
+          : ""}
       </div>
     </article>
   `).join("");
@@ -402,6 +592,7 @@ function setEmptyResultState() {
 
 function renderPlanProgress(plan) {
   const connectors = (plan.chosen_connector_ids || []).map(displayConnector);
+  const siteStrategies = (plan.site_search_strategies || []).map(summarizeSiteStrategy);
   prettyJson("planOutput", plan);
   document.getElementById("confidenceBadge").textContent = "Planning";
   document.getElementById("confidenceBadge").className = "badge";
@@ -413,7 +604,8 @@ function renderPlanProgress(plan) {
       `planner_mode: ${plan.planner_mode || "unknown"}`,
       `max_rounds: ${plan.stop_policy?.max_rounds || 0}`,
       `queries: ${(plan.initial_queries || []).join(" | ")}`,
-      `memory hints: ${(plan.experience_hints?.boosted_source_types || []).join(" | ") || "none"}`
+      `memory hints: ${(plan.experience_hints?.boosted_source_types || []).join(" | ") || "none"}`,
+      `site strategies: ${siteStrategies.join(" | ") || "none"}`
     ]
   );
 }
@@ -429,6 +621,7 @@ function renderRoundProgress(payload) {
     (payload.round.chosen_connector_ids || []).map(displayConnector),
     [
       `queries: ${(payload.round.queries || []).join(" | ")}`,
+      `site searches: ${(payload.round.executed_search_tasks || []).map(summarizeExecutedSearchTask).join(" | ") || "none"}`,
       `selected: ${(payload.round.selected_sources || []).map((item) => `${item.title} (${displayConnector(item.connector)})`).join(" | ") || "none"}`,
       `verifier follow-ups: ${payload.round.agent_reports?.fact_verifier?.review_count || 0}`
     ]
@@ -481,8 +674,10 @@ async function fetchSamples() {
   renderCapabilities(data.source_capabilities || []);
   state.connectorLabels = Object.fromEntries((data.source_capabilities || []).map((item) => [item.id, item.label || item.id]));
   state.memory = data.experience_memory || [];
+  state.experienceOverview = data.experience_overview || null;
   state.toolMemory = data.tool_memory || null;
   state.toolAudit = data.tool_audit_recent || [];
+  renderExperienceOverview(state.experienceOverview);
   renderMemory(state.memory);
 }
 
@@ -572,8 +767,10 @@ async function runResearch() {
       renderVerifierFollowUps(result);
       renderKnowledgeGraph(result.knowledge_graph || null);
       state.memory = [result.experience, ...state.memory].slice(0, 8);
+      state.experienceOverview = result.experience_overview || state.experienceOverview;
       state.toolMemory = result.tool_memory || state.toolMemory;
       state.toolAudit = result.runtime?.tool_audit_recent || state.toolAudit;
+      renderExperienceOverview(state.experienceOverview);
       renderMemory(state.memory);
       setRunButtonIdle();
     });
@@ -622,6 +819,7 @@ function resetView() {
   prettyJson("planOutput", null);
   prettyJson("evaluationOutput", null);
   setEmptyResultState();
+  renderExperienceOverview(state.experienceOverview);
   setRunButtonIdle();
 }
 

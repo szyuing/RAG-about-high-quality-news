@@ -4,6 +4,11 @@ const { createEvidenceUnit } = require("./evidence-model");
 const { extractTextFromResponsePayload } = require("./openai-response");
 const { resolveDataFile } = require("./data-paths");
 const {
+  getRelevantSearchSiteHints,
+  inferConnectorIdsFromSiteHints,
+  buildSiteSeedQueries
+} = require("./site-hints");
+const {
   createAgentRuntime,
   dispatchAgentTask,
   completeAgentTask,
@@ -43,8 +48,11 @@ const knowledgeGraphPath = resolveDataFile("knowledge-graph.json", "OPENSEARCH_K
 const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 const DEFAULT_PLANNER_MODEL = process.env.OPENAI_PLANNER_MODEL || "gpt-4o-mini";
 const DEFAULT_SYNTHESIS_MODEL = process.env.OPENAI_SYNTHESIS_MODEL || DEFAULT_PLANNER_MODEL;
+const DEFAULT_MEMORY_MODEL = process.env.OPENAI_MEMORY_MODEL || DEFAULT_PLANNER_MODEL;
 const ROUTABLE_AGENT_IDS = ["long_text_collector", "video_parser", "chart_parser", "fact_verifier"];
 const ROUTABLE_TOOL_IDS = ["deep_read_page", "extract_video_intel", "read_document_intel"];
+const OPENAI_MAX_ATTEMPTS = Math.max(1, Number(process.env.OPENSEARCH_OPENAI_MAX_ATTEMPTS || 2));
+const OPENAI_RETRY_BASE_MS = Math.max(100, Number(process.env.OPENSEARCH_OPENAI_RETRY_BASE_MS || 400));
 
 function normalizeText(value) {
   return String(value || "")
@@ -74,11 +82,680 @@ function dedupeBy(items, getKey) {
   return Array.from(map.values());
 }
 
+function logRecoverableError(scope, error) {
+  const message = error?.message || String(error || "unknown error");
+  console.warn(`[${scope}] ${message}`);
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetriableOpenAIError(error, statusCode = null) {
+  const resolvedStatusCode = typeof statusCode === "number"
+    ? statusCode
+    : Number(error?.statusCode);
+  if (Number.isFinite(resolvedStatusCode)) {
+    return resolvedStatusCode === 429 || resolvedStatusCode >= 500;
+  }
+  const message = String(error?.message || "");
+  return /timed out|timeout|fetch failed|network|ECONNRESET|ENOTFOUND|EAI_AGAIN|AbortError/i.test(message);
+}
+
+async function fetchOpenAIJsonWithRetry(apiKey, body, { timeoutMs = 20000, operation = "openai_request", maxAttempts = OPENAI_MAX_ATTEMPTS } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(OPENAI_RESPONSES_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey}`
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+        body: JSON.stringify(body)
+      });
+      let rawText = "";
+      let payload = null;
+      if (typeof response.text === "function") {
+        rawText = await response.text();
+        if (rawText) {
+          try {
+            payload = JSON.parse(rawText);
+          } catch (_) {
+            payload = null;
+          }
+        }
+      } else if (typeof response.json === "function") {
+        payload = await response.json();
+        rawText = payload ? JSON.stringify(payload) : "";
+      }
+      if (!response.ok) {
+        const error = new Error(payload?.error?.message || rawText.trim() || `${operation} failed with HTTP ${response.status}`);
+        error.statusCode = response.status;
+        if (attempt < maxAttempts && isRetriableOpenAIError(error, response.status)) {
+          logRecoverableError(operation, new Error(`attempt ${attempt}/${maxAttempts} failed, retrying: ${error.message}`));
+          await wait(OPENAI_RETRY_BASE_MS * attempt);
+          continue;
+        }
+        throw error;
+      }
+      if (!payload) {
+        const error = new Error(`${operation} returned a non-JSON response`);
+        error.statusCode = response.status;
+        throw error;
+      }
+      return payload;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts && isRetriableOpenAIError(error)) {
+        logRecoverableError(operation, new Error(`attempt ${attempt}/${maxAttempts} failed, retrying: ${error.message}`));
+        await wait(OPENAI_RETRY_BASE_MS * attempt);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError || new Error(`${operation} failed`);
+}
+
 function compactStringList(values, { minLength = 1, limit = 6 } = {}) {
   return Array.from(new Set((values || [])
     .map((item) => String(item || "").trim())
     .filter((item) => item.length >= minLength)))
     .slice(0, limit);
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function clampNumber(value, { min = 0, max = 1, fallback = 0 } = {}) {
+  return Math.min(max, Math.max(min, toFiniteNumber(value, fallback)));
+}
+
+function normalizeIsoTimestamp(value, fallback = new Date().toISOString()) {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : fallback;
+}
+
+function mergeWeightedAverage(leftValue, leftWeight, rightValue, rightWeight, digits = 2) {
+  const totalWeight = Math.max(1, toFiniteNumber(leftWeight, 0) + toFiniteNumber(rightWeight, 0));
+  const total = (toFiniteNumber(leftValue, 0) * toFiniteNumber(leftWeight, 0))
+    + (toFiniteNumber(rightValue, 0) * toFiniteNumber(rightWeight, 0));
+  return Number((total / totalWeight).toFixed(digits));
+}
+
+function normalizeConnectorIdList(values, { limit = 4 } = {}) {
+  const validIds = new Set(sourceCatalog.map((item) => item.id));
+  return compactStringList(values, { minLength: 2, limit: Math.max(limit * 2, 8) })
+    .filter((item) => validIds.has(item))
+    .slice(0, limit);
+}
+
+function collectRankedExperienceValues(entries, selector, { limit = 4, minLength = 2 } = {}) {
+  const scores = new Map();
+  for (const entry of entries || []) {
+    const entryWeight = (entry.relevance || 0)
+      + clampNumber(entry.metrics?.quality_score, { min: 0, max: 1, fallback: 0 })
+      + Math.min(2, toFiniteNumber(entry.run_count, 1) * 0.25);
+    for (const value of selector(entry) || []) {
+      const normalized = String(value || "").trim();
+      if (normalized.length < minLength) {
+        continue;
+      }
+      scores.set(normalized, (scores.get(normalized) || 0) + entryWeight);
+    }
+  }
+
+  return [...scores.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .map(([value]) => value)
+    .slice(0, limit);
+}
+
+function uniqueObjectList(items, getKey, limit = 6) {
+  const map = new Map();
+  for (const item of items || []) {
+    if (!item) {
+      continue;
+    }
+    const key = getKey(item);
+    if (!key || map.has(key)) {
+      continue;
+    }
+    map.set(key, item);
+  }
+  return [...map.values()].slice(0, limit);
+}
+
+function normalizeExperienceEntry(entry = {}) {
+  const createdAt = normalizeIsoTimestamp(entry.created_at);
+  const lastSeenAt = normalizeIsoTimestamp(entry.last_seen_at || createdAt, createdAt);
+  const runCount = Math.max(1, Math.round(toFiniteNumber(entry.run_count, 1)));
+  const successCount = Math.min(
+    runCount,
+    Math.max(
+      0,
+      Math.round(
+        toFiniteNumber(
+          entry.success_count,
+          entry.metrics?.sufficiency || entry.is_sufficient ? 1 : 0
+        )
+      )
+    )
+  );
+  const promotedSites = compactStringList([
+    ...(entry.learned_patterns?.promoted_sites || []),
+    ...((entry.ephemeral_tool_insights?.promote_candidates || []).map((item) => item.site))
+  ], { minLength: 3, limit: 4 });
+
+  return {
+    ...entry,
+    created_at: createdAt,
+    last_seen_at: lastSeenAt,
+    question: String(entry.question || "").trim(),
+    question_key: normalizeText(entry.question_key || entry.question),
+    pinned: Boolean(entry.pinned),
+    pinned_at: entry.pinned ? normalizeIsoTimestamp(entry.pinned_at || entry.last_seen_at || createdAt, createdAt) : null,
+    pin_note: String(entry.pin_note || "").trim(),
+    run_count: runCount,
+    success_count: successCount,
+    useful_queries: compactStringList(entry.useful_queries, { minLength: 2, limit: 6 }),
+    useful_source_types: compactStringList(entry.useful_source_types, { minLength: 2, limit: 6 }),
+    useful_platforms: compactStringList(entry.useful_platforms, { minLength: 2, limit: 6 }),
+    effective_search_terms: compactStringList(entry.effective_search_terms, { minLength: 2, limit: 6 }),
+    primary_source_sites: compactStringList(entry.primary_source_sites, { minLength: 2, limit: 6 }),
+    efficient_tool_combinations: compactStringList(entry.efficient_tool_combinations, { minLength: 2, limit: 6 }),
+    learned_patterns: {
+      boosted_connector_ids: normalizeConnectorIdList([
+        ...(entry.learned_patterns?.boosted_connector_ids || []),
+        ...(entry.preferred_connector_ids || [])
+      ]),
+      avoided_connector_ids: normalizeConnectorIdList([
+        ...(entry.learned_patterns?.avoided_connector_ids || []),
+        ...(entry.failed_connector_ids || [])
+      ]),
+      follow_up_queries: compactStringList(entry.learned_patterns?.follow_up_queries, { minLength: 2, limit: 4 }),
+      promoted_sites: promotedSites
+    },
+    ephemeral_tool_insights: {
+      attempts: Math.max(0, Math.round(toFiniteNumber(entry.ephemeral_tool_insights?.attempts, 0))),
+      recovered_sources: compactStringList(entry.ephemeral_tool_insights?.recovered_sources, { minLength: 4, limit: 6 }),
+      promote_candidates: (entry.ephemeral_tool_insights?.promote_candidates || [])
+        .filter((item) => item && item.site && item.strategy)
+        .slice(0, 4)
+    },
+    llm_memory: {
+      model: entry.llm_memory?.model || null,
+      mode: entry.llm_memory?.mode || null,
+      fallback_reason: String(entry.llm_memory?.fallback_reason || "").trim(),
+      reusable_insights: compactStringList(entry.llm_memory?.reusable_insights, { minLength: 4, limit: 5 }),
+      retrieval_tags: compactStringList(entry.llm_memory?.retrieval_tags, { minLength: 2, limit: 6 }),
+      merge_target_question_key: normalizeText(entry.llm_memory?.merge_target_question_key || ""),
+      merge_rationale: String(entry.llm_memory?.merge_rationale || "").trim()
+    },
+    noisy_paths: compactStringList(entry.noisy_paths, { minLength: 3, limit: 6 }),
+    metrics: {
+      quality_score: clampNumber(entry.metrics?.quality_score ?? entry.quality_score, { min: 0, max: 1, fallback: 0 }),
+      confidence: clampNumber(entry.metrics?.confidence ?? entry.confidence, { min: 0, max: 1, fallback: 0 }),
+      sufficiency: Boolean(entry.metrics?.sufficiency ?? entry.is_sufficient),
+      rounds_completed: Math.max(0, Math.round(toFiniteNumber(entry.metrics?.rounds_completed, 0))),
+      sources_read: Math.max(0, Math.round(toFiniteNumber(entry.metrics?.sources_read, 0))),
+      evidence_items: Math.max(0, Math.round(toFiniteNumber(entry.metrics?.evidence_items, 0))),
+      confirmations: Math.max(0, Math.round(toFiniteNumber(entry.metrics?.confirmations, 0))),
+      conflicts: Math.max(0, Math.round(toFiniteNumber(entry.metrics?.conflicts, 0))),
+      coverage_gaps: Math.max(0, Math.round(toFiniteNumber(entry.metrics?.coverage_gaps, 0))),
+      successful_ephemeral_tools: Math.max(0, Math.round(toFiniteNumber(entry.metrics?.successful_ephemeral_tools, 0))),
+      failed_ephemeral_tools: Math.max(0, Math.round(toFiniteNumber(entry.metrics?.failed_ephemeral_tools, 0)))
+    },
+    note: String(entry.note || "").trim()
+  };
+}
+
+function mergeExperienceEntries(currentEntry, incomingEntry) {
+  const current = normalizeExperienceEntry(currentEntry);
+  const incoming = normalizeExperienceEntry(incomingEntry);
+  const runCount = current.run_count + incoming.run_count;
+  const successCount = Math.min(runCount, current.success_count + incoming.success_count);
+
+  return normalizeExperienceEntry({
+    ...current,
+    ...incoming,
+    created_at: new Date(Math.min(Date.parse(current.created_at), Date.parse(incoming.created_at))).toISOString(),
+    last_seen_at: new Date(Math.max(Date.parse(current.last_seen_at), Date.parse(incoming.last_seen_at))).toISOString(),
+    question: incoming.question || current.question,
+    run_count: runCount,
+    success_count: successCount,
+    useful_queries: [...incoming.useful_queries, ...current.useful_queries],
+    useful_source_types: [...incoming.useful_source_types, ...current.useful_source_types],
+    useful_platforms: [...incoming.useful_platforms, ...current.useful_platforms],
+    effective_search_terms: [...incoming.effective_search_terms, ...current.effective_search_terms],
+    primary_source_sites: [...incoming.primary_source_sites, ...current.primary_source_sites],
+    efficient_tool_combinations: [...incoming.efficient_tool_combinations, ...current.efficient_tool_combinations],
+    learned_patterns: {
+      boosted_connector_ids: [...incoming.learned_patterns.boosted_connector_ids, ...current.learned_patterns.boosted_connector_ids],
+      avoided_connector_ids: [...incoming.learned_patterns.avoided_connector_ids, ...current.learned_patterns.avoided_connector_ids],
+      follow_up_queries: [...incoming.learned_patterns.follow_up_queries, ...current.learned_patterns.follow_up_queries],
+      promoted_sites: [...incoming.learned_patterns.promoted_sites, ...current.learned_patterns.promoted_sites]
+    },
+    ephemeral_tool_insights: {
+      attempts: current.ephemeral_tool_insights.attempts + incoming.ephemeral_tool_insights.attempts,
+      recovered_sources: [...incoming.ephemeral_tool_insights.recovered_sources, ...current.ephemeral_tool_insights.recovered_sources],
+      promote_candidates: [...incoming.ephemeral_tool_insights.promote_candidates, ...current.ephemeral_tool_insights.promote_candidates]
+    },
+    llm_memory: {
+      model: incoming.llm_memory.model || current.llm_memory.model,
+      mode: incoming.llm_memory.mode || current.llm_memory.mode,
+      fallback_reason: incoming.llm_memory.fallback_reason || current.llm_memory.fallback_reason,
+      reusable_insights: [...incoming.llm_memory.reusable_insights, ...current.llm_memory.reusable_insights],
+      retrieval_tags: [...incoming.llm_memory.retrieval_tags, ...current.llm_memory.retrieval_tags],
+      merge_target_question_key: incoming.llm_memory.merge_target_question_key || current.llm_memory.merge_target_question_key,
+      merge_rationale: incoming.llm_memory.merge_rationale || current.llm_memory.merge_rationale
+    },
+    noisy_paths: [...incoming.noisy_paths, ...current.noisy_paths],
+    metrics: {
+      quality_score: mergeWeightedAverage(current.metrics.quality_score, current.run_count, incoming.metrics.quality_score, incoming.run_count),
+      confidence: mergeWeightedAverage(current.metrics.confidence, current.run_count, incoming.metrics.confidence, incoming.run_count),
+      sufficiency: incoming.metrics.sufficiency || current.metrics.sufficiency,
+      rounds_completed: Math.max(current.metrics.rounds_completed, incoming.metrics.rounds_completed),
+      sources_read: Math.max(current.metrics.sources_read, incoming.metrics.sources_read),
+      evidence_items: Math.max(current.metrics.evidence_items, incoming.metrics.evidence_items),
+      confirmations: Math.max(current.metrics.confirmations, incoming.metrics.confirmations),
+      conflicts: Math.max(current.metrics.conflicts, incoming.metrics.conflicts),
+      coverage_gaps: Math.max(current.metrics.coverage_gaps, incoming.metrics.coverage_gaps),
+      successful_ephemeral_tools: Math.max(current.metrics.successful_ephemeral_tools, incoming.metrics.successful_ephemeral_tools),
+      failed_ephemeral_tools: Math.max(current.metrics.failed_ephemeral_tools, incoming.metrics.failed_ephemeral_tools)
+    },
+    note: incoming.note || current.note
+  });
+}
+
+function recordExperienceMemoryEntry(memory, incomingEntry, { limit = 30 } = {}) {
+  const normalizedIncoming = normalizeExperienceEntry(incomingEntry);
+  const grouped = new Map();
+
+  for (const entry of memory || []) {
+    const normalized = normalizeExperienceEntry(entry);
+    const key = normalized.question_key || `${normalized.question}:${normalized.created_at}`;
+    grouped.set(key, grouped.has(key) ? mergeExperienceEntries(grouped.get(key), normalized) : normalized);
+  }
+
+  const incomingKey = normalizedIncoming.question_key || `${normalizedIncoming.question}:${normalizedIncoming.created_at}`;
+  grouped.set(
+    incomingKey,
+    grouped.has(incomingKey)
+      ? mergeExperienceEntries(grouped.get(incomingKey), normalizedIncoming)
+      : normalizedIncoming
+  );
+
+  return [...grouped.values()]
+    .sort((left, right) => {
+      if (Boolean(left.pinned) !== Boolean(right.pinned)) {
+        return left.pinned ? -1 : 1;
+      }
+      const timeDiff = Date.parse(right.last_seen_at) - Date.parse(left.last_seen_at);
+      if (timeDiff !== 0) {
+        return timeDiff;
+      }
+      return (right.metrics?.quality_score || 0) - (left.metrics?.quality_score || 0);
+    })
+    .slice(0, limit);
+}
+
+function listExperienceMemory(filters = {}) {
+  const query = normalizeText(filters.query || filters.q || "");
+  const sourceType = normalizeText(filters.source_type || "");
+  const connectorId = String(filters.connector_id || "").trim();
+  const site = normalizeText(filters.site || "");
+  const pinned = filters.pinned === undefined || filters.pinned === null || filters.pinned === ""
+    ? null
+    : Boolean(filters.pinned);
+  const limit = Math.max(1, Math.min(200, Number(filters.limit || 50)));
+
+  return readExperienceMemory()
+    .filter((entry) => {
+      if (pinned !== null && Boolean(entry.pinned) !== pinned) {
+        return false;
+      }
+      if (query) {
+        const blob = normalizeText([
+          entry.question,
+          ...(entry.useful_queries || []),
+          ...(entry.useful_source_types || []),
+          ...(entry.learned_patterns?.boosted_connector_ids || []),
+          ...(entry.learned_patterns?.promoted_sites || [])
+        ].join(" "));
+        if (!blob.includes(query)) {
+          return false;
+        }
+      }
+      if (sourceType) {
+        const matched = (entry.useful_source_types || []).some((item) => normalizeText(item) === sourceType);
+        if (!matched) {
+          return false;
+        }
+      }
+      if (connectorId) {
+        const matched = (entry.learned_patterns?.boosted_connector_ids || []).includes(connectorId)
+          || (entry.learned_patterns?.avoided_connector_ids || []).includes(connectorId);
+        if (!matched) {
+          return false;
+        }
+      }
+      if (site) {
+        const matched = (entry.learned_patterns?.promoted_sites || []).some((item) => normalizeText(item).includes(site));
+        if (!matched) {
+          return false;
+        }
+      }
+      return true;
+    })
+    .slice(0, limit);
+}
+
+function setExperiencePinned(questionKey, { pinned = true, pinNote = "" } = {}) {
+  const normalizedKey = normalizeText(questionKey);
+  if (!normalizedKey) {
+    return null;
+  }
+
+  const memory = readExperienceMemory();
+  const index = memory.findIndex((entry) => entry.question_key === normalizedKey);
+  if (index === -1) {
+    return null;
+  }
+
+  const current = normalizeExperienceEntry(memory[index]);
+  const updated = normalizeExperienceEntry({
+    ...current,
+    pinned: Boolean(pinned),
+    pinned_at: pinned ? new Date().toISOString() : null,
+    pin_note: pinned ? String(pinNote || current.pin_note || "").trim() : ""
+  });
+  memory[index] = updated;
+  writeExperienceMemory(memory);
+  return updated;
+}
+
+function clearExperienceMemory({ questionKey = "", onlyUnpinned = false } = {}) {
+  const normalizedKey = normalizeText(questionKey);
+  const memory = readExperienceMemory();
+  let next = memory;
+
+  if (normalizedKey) {
+    next = memory.filter((entry) => entry.question_key !== normalizedKey);
+  } else if (onlyUnpinned) {
+    next = memory.filter((entry) => entry.pinned);
+  } else {
+    next = [];
+  }
+
+  writeExperienceMemory(next);
+  return {
+    removed_count: Math.max(0, memory.length - next.length),
+    remaining_count: next.length,
+    entries: next
+  };
+}
+
+function summarizeExperienceMemory(entries = readExperienceMemory()) {
+  const normalizedEntries = (entries || []).map((entry) => normalizeExperienceEntry(entry));
+  const pinnedCount = normalizedEntries.filter((entry) => entry.pinned).length;
+  const successfulRuns = normalizedEntries.reduce((total, entry) => total + (entry.success_count || 0), 0);
+  const totalRuns = normalizedEntries.reduce((total, entry) => total + (entry.run_count || 0), 0);
+
+  return {
+    schema_version: "experience-overview.v1",
+    total_entries: normalizedEntries.length,
+    pinned_entries: pinnedCount,
+    run_success_rate: totalRuns > 0 ? Number((successfulRuns / totalRuns).toFixed(2)) : 0,
+    top_queries: collectRankedExperienceValues(normalizedEntries, (entry) => entry.useful_queries || [], { limit: 5, minLength: 2 }),
+    top_source_types: collectRankedExperienceValues(normalizedEntries, (entry) => entry.useful_source_types || [], { limit: 5, minLength: 2 }),
+    top_connectors: collectRankedExperienceValues(normalizedEntries, (entry) => entry.learned_patterns?.boosted_connector_ids || [], { limit: 5, minLength: 2 }),
+    top_sites: collectRankedExperienceValues(normalizedEntries, (entry) => entry.learned_patterns?.promoted_sites || [], { limit: 5, minLength: 3 }),
+    recurring_gaps: collectRankedExperienceValues(normalizedEntries, (entry) => entry.noisy_paths || [], { limit: 5, minLength: 3 }),
+    latest_questions: normalizedEntries.slice(0, 5).map((entry) => entry.question)
+  };
+}
+
+async function requestExperienceMemoryFromModel(question, draftEntry, priorEntries = [], finalAnswer = null, evaluation = null) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey || !draftEntry?.question) {
+    return null;
+  }
+
+  const priorDigest = priorEntries.slice(0, 4).map((entry) => ({
+    question: entry.question,
+    question_key: entry.question_key,
+    relevance: entry.relevance || 0,
+    useful_queries: (entry.useful_queries || []).slice(0, 4),
+    useful_source_types: (entry.useful_source_types || []).slice(0, 4),
+    learned_patterns: entry.learned_patterns || {},
+    note: entry.note || "",
+    metrics: entry.metrics || {}
+  }));
+
+  const finalAnswerDigest = finalAnswer ? {
+    quick_answer: finalAnswer.quick_answer,
+    conclusion: finalAnswer.deep_research_summary?.conclusion || "",
+    uncertainty: finalAnswer.uncertainty || []
+  } : null;
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      canonical_question: { type: "string" },
+      memory_summary: { type: "string" },
+      reusable_insights: {
+        type: "array",
+        maxItems: 5,
+        items: { type: "string" }
+      },
+      retrieval_tags: {
+        type: "array",
+        maxItems: 6,
+        items: { type: "string" }
+      },
+      useful_queries: {
+        type: "array",
+        maxItems: 6,
+        items: { type: "string" }
+      },
+      useful_source_types: {
+        type: "array",
+        maxItems: 6,
+        items: { type: "string" }
+      },
+      boosted_connector_ids: {
+        type: "array",
+        maxItems: 4,
+        items: { type: "string" }
+      },
+      avoided_connector_ids: {
+        type: "array",
+        maxItems: 4,
+        items: { type: "string" }
+      },
+      follow_up_queries: {
+        type: "array",
+        maxItems: 4,
+        items: { type: "string" }
+      },
+      promoted_sites: {
+        type: "array",
+        maxItems: 4,
+        items: { type: "string" }
+      },
+      noisy_patterns: {
+        type: "array",
+        maxItems: 4,
+        items: { type: "string" }
+      },
+      merge_target_question_key: { type: "string" },
+      merge_rationale: { type: "string" }
+    },
+    required: [
+      "canonical_question",
+      "memory_summary",
+      "reusable_insights",
+      "retrieval_tags",
+      "useful_queries",
+      "useful_source_types",
+      "boosted_connector_ids",
+      "avoided_connector_ids",
+      "follow_up_queries",
+      "promoted_sites",
+      "noisy_patterns",
+      "merge_target_question_key",
+      "merge_rationale"
+    ]
+  };
+
+  const prompt = [
+    "You are the memory curator for a deep research agent.",
+    "Your job is to convert one finished research task into reusable memory.",
+    "Do four things in one pass: create a concise reusable memory item, organize it, integrate it with similar past memory, and summarize what is worth retrieving later.",
+    "Only use the supplied task record and prior memory candidates.",
+    "If no prior memory should be merged, leave merge_target_question_key empty.",
+    "Prefer canonical, reusable wording over one-off phrasing.",
+    "Question:",
+    question,
+    "",
+    "Draft memory:",
+    JSON.stringify(draftEntry, null, 2),
+    "",
+    "Evaluation:",
+    JSON.stringify(evaluation || {}, null, 2),
+    "",
+    "Final answer digest:",
+    JSON.stringify(finalAnswerDigest || {}, null, 2),
+    "",
+    "Prior similar memory candidates:",
+    JSON.stringify(priorDigest, null, 2)
+  ].join("\n");
+
+  const payload = await fetchOpenAIJsonWithRetry(apiKey, {
+    model: DEFAULT_MEMORY_MODEL,
+    store: false,
+    input: prompt,
+    text: {
+      format: {
+        type: "json_schema",
+        name: "experience_memory",
+        strict: true,
+        schema
+      }
+    }
+  }, {
+    timeoutMs: 25000,
+    operation: "openai_memory"
+  });
+
+  const rawText = extractTextFromResponsePayload(payload);
+  if (!rawText) {
+    throw new Error("OpenAI memory returned no text output");
+  }
+
+  return JSON.parse(rawText);
+}
+
+function applyExperienceMemoryModelOutput(draftEntry, modelOutput = null, priorEntries = []) {
+  if (!modelOutput) {
+    return normalizeExperienceEntry({
+      ...draftEntry,
+      llm_memory: {
+        model: null,
+        mode: "heuristic",
+        reusable_insights: [],
+        retrieval_tags: [],
+        merge_rationale: ""
+      }
+    });
+  }
+
+  const canonicalQuestion = String(modelOutput.canonical_question || draftEntry.question || "").trim() || draftEntry.question;
+  const mergeTargetKey = String(modelOutput.merge_target_question_key || "").trim();
+  const matchedPrior = mergeTargetKey
+    ? priorEntries.find((entry) => entry.question_key === normalizeText(mergeTargetKey))
+    : null;
+
+  return normalizeExperienceEntry({
+    ...draftEntry,
+    question: canonicalQuestion,
+    question_key: matchedPrior?.question_key || normalizeText(canonicalQuestion),
+    useful_queries: [
+      ...(draftEntry.useful_queries || []),
+      ...(modelOutput.useful_queries || [])
+    ],
+    useful_source_types: [
+      ...(draftEntry.useful_source_types || []),
+      ...(modelOutput.useful_source_types || [])
+    ],
+    learned_patterns: {
+      ...(draftEntry.learned_patterns || {}),
+      boosted_connector_ids: [
+        ...(draftEntry.learned_patterns?.boosted_connector_ids || []),
+        ...(modelOutput.boosted_connector_ids || [])
+      ],
+      avoided_connector_ids: [
+        ...(draftEntry.learned_patterns?.avoided_connector_ids || []),
+        ...(modelOutput.avoided_connector_ids || [])
+      ],
+      follow_up_queries: [
+        ...(draftEntry.learned_patterns?.follow_up_queries || []),
+        ...(modelOutput.follow_up_queries || [])
+      ],
+      promoted_sites: [
+        ...(draftEntry.learned_patterns?.promoted_sites || []),
+        ...(modelOutput.promoted_sites || [])
+      ]
+    },
+    noisy_paths: [
+      ...(draftEntry.noisy_paths || []),
+      ...(modelOutput.noisy_patterns || [])
+    ],
+    note: String(modelOutput.memory_summary || draftEntry.note || "").trim(),
+    llm_memory: {
+      model: DEFAULT_MEMORY_MODEL,
+      mode: "llm",
+      reusable_insights: compactStringList(modelOutput.reusable_insights, { minLength: 4, limit: 5 }),
+      retrieval_tags: compactStringList(modelOutput.retrieval_tags, { minLength: 2, limit: 6 }),
+      merge_target_question_key: matchedPrior?.question_key || normalizeText(mergeTargetKey),
+      merge_rationale: String(modelOutput.merge_rationale || "").trim()
+    }
+  });
+}
+
+async function finalizeExperienceMemory(question, scratchpad, plan, evaluation, telemetry, verification, finalAnswer, existingMemory = readExperienceMemory()) {
+  const draft = summarizeExperience(question, scratchpad, plan, evaluation, telemetry, verification);
+  const priorEntries = [...(existingMemory || [])]
+    .map((entry) => ({
+      ...normalizeExperienceEntry(entry),
+      relevance: scoreExperienceRelevance(question, entry)
+    }))
+    .filter((entry) => entry.relevance > 0)
+    .sort((left, right) => right.relevance - left.relevance)
+    .slice(0, 4);
+
+  try {
+    const modelOutput = await requestExperienceMemoryFromModel(question, draft, priorEntries, finalAnswer, evaluation);
+    return applyExperienceMemoryModelOutput(draft, modelOutput, priorEntries);
+  } catch (error) {
+    return normalizeExperienceEntry({
+      ...draft,
+      llm_memory: {
+        model: DEFAULT_MEMORY_MODEL,
+        mode: "fallback",
+        fallback_reason: error.message,
+        reusable_insights: [],
+        retrieval_tags: [],
+        merge_rationale: ""
+      }
+    });
+  }
 }
 
 function normalizeModelSelectedCandidateIds(candidateIds, fallbackIds = []) {
@@ -115,23 +792,84 @@ function normalizeModelToolId(toolId, fallbackTool = "deep_read_page") {
   return ROUTABLE_TOOL_IDS.includes(toolId) ? toolId : fallbackTool;
 }
 
+function normalizeSiteDomain(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const url = /^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`;
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch (error) {
+    const match = raw.match(/([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i);
+    return match ? match[1].toLowerCase().replace(/^www\./, "") : "";
+  }
+}
+
+function normalizeModelSiteSearchStrategies(strategies, basePlan) {
+  const validConnectorIds = new Set((basePlan?.source_capabilities || []).map((item) => item.id));
+  const hintedDomains = new Set((basePlan?.search_site_hints?.items || [])
+    .map((item) => normalizeSiteDomain(item.domain || item.url))
+    .filter(Boolean));
+  const allowedModes = new Set(["connector_search", "site_query", "hybrid", "verify_only"]);
+
+  return (strategies || [])
+    .map((item) => {
+      const domain = normalizeSiteDomain(item?.domain || item?.site_domain || "");
+      const connectorId = validConnectorIds.has(item?.connector_id) ? item.connector_id : null;
+      const searchMode = allowedModes.has(item?.search_mode)
+        ? item.search_mode
+        : (domain ? "site_query" : "connector_search");
+      const queryVariants = compactStringList(item?.query_variants, { minLength: 2, limit: 4 });
+      const siteName = String(item?.site_name || item?.name || domain || "").trim();
+      const rationale = String(item?.rationale || item?.reason || "").trim();
+
+      if (!siteName && !domain) {
+        return null;
+      }
+      if (!domain && (searchMode === "site_query" || searchMode === "hybrid")) {
+        return null;
+      }
+      if (domain && hintedDomains.size && !hintedDomains.has(domain)) {
+        return null;
+      }
+
+      return {
+        site_name: siteName,
+        domain,
+        connector_id: connectorId,
+        search_mode: searchMode,
+        query_variants: queryVariants,
+        rationale
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
 function readExperienceMemory() {
   try {
-    return JSON.parse(fs.readFileSync(experiencePath, "utf8"));
-  } catch (_) {
+    const payload = JSON.parse(fs.readFileSync(experiencePath, "utf8"));
+    return Array.isArray(payload) ? payload.map((entry) => normalizeExperienceEntry(entry)) : [];
+  } catch (error) {
+    logRecoverableError("readExperienceMemory", error);
     return [];
   }
 }
 
 function writeExperienceMemory(entries) {
-  fs.writeFileSync(experiencePath, JSON.stringify(entries, null, 2));
+  fs.writeFileSync(
+    experiencePath,
+    JSON.stringify((entries || []).map((entry) => normalizeExperienceEntry(entry)), null, 2)
+  );
 }
 
 function readKnowledgeGraph() {
   try {
     const payload = JSON.parse(fs.readFileSync(knowledgeGraphPath, "utf8"));
     return KnowledgeGraph.fromExport(payload);
-  } catch (_) {
+  } catch (error) {
+    logRecoverableError("readKnowledgeGraph", error);
     return null;
   }
 }
@@ -186,22 +924,62 @@ function buildEnglishQueryHints(question) {
 }
 
 function scoreExperienceRelevance(question, entry) {
+  const normalizedEntry = normalizeExperienceEntry(entry);
   const questionTokens = tokenize(question);
+  const normalizedQuestion = normalizeText(question);
   const blob = normalizeText([
-    entry.question,
-    ...(entry.useful_queries || []),
-    ...(entry.useful_source_types || []),
-    ...(entry.useful_platforms || []),
-    ...(entry.effective_search_terms || [])
+    normalizedEntry.question,
+    ...(normalizedEntry.useful_queries || []),
+    ...(normalizedEntry.useful_source_types || []),
+    ...(normalizedEntry.useful_platforms || []),
+    ...(normalizedEntry.effective_search_terms || []),
+    ...(normalizedEntry.primary_source_sites || []),
+    ...(normalizedEntry.learned_patterns?.boosted_connector_ids || []),
+    ...(normalizedEntry.learned_patterns?.promoted_sites || []),
+    ...(normalizedEntry.llm_memory?.retrieval_tags || []),
+    ...(normalizedEntry.llm_memory?.reusable_insights || [])
   ].join(" "));
 
-  return questionTokens.reduce((score, token) => score + (blob.includes(token) ? 1 : 0), 0);
+  const tokenScore = questionTokens.reduce((score, token) => score + (blob.includes(token) ? 1 : 0), 0);
+  const exactMatchBoost = normalizeText(normalizedEntry.question) === normalizedQuestion ? 4 : 0;
+  const partialMatchBoost = !exactMatchBoost
+    && normalizedQuestion
+    && (normalizeText(normalizedEntry.question).includes(normalizedQuestion)
+      || normalizedQuestion.includes(normalizeText(normalizedEntry.question)))
+    ? 2
+    : 0;
+  const qualityBoost = clampNumber(normalizedEntry.metrics?.quality_score, { min: 0, max: 1, fallback: 0 }) * 2;
+  const successRateBoost = normalizedEntry.run_count > 0
+    ? Number(((normalizedEntry.success_count / normalizedEntry.run_count) * 1.5).toFixed(2))
+    : 0;
+  const recencyBoost = (() => {
+    const ageDays = (Date.now() - Date.parse(normalizedEntry.last_seen_at || normalizedEntry.created_at)) / (1000 * 60 * 60 * 24);
+    if (!Number.isFinite(ageDays) || ageDays < 0) {
+      return 0;
+    }
+    if (ageDays <= 7) {
+      return 1.5;
+    }
+    if (ageDays <= 30) {
+      return 1;
+    }
+    if (ageDays <= 90) {
+      return 0.5;
+    }
+    return 0;
+  })();
+
+  if (tokenScore === 0 && exactMatchBoost === 0 && partialMatchBoost === 0) {
+    return 0;
+  }
+
+  return Number((tokenScore + exactMatchBoost + partialMatchBoost + qualityBoost + successRateBoost + recencyBoost).toFixed(2));
 }
 
 function getRelevantExperienceHints(question, memory = readExperienceMemory()) {
   const entries = [...memory]
     .map((entry) => ({
-      ...entry,
+      ...normalizeExperienceEntry(entry),
       relevance: scoreExperienceRelevance(question, entry)
     }))
     .filter((entry) => entry.relevance > 0)
@@ -210,17 +988,30 @@ function getRelevantExperienceHints(question, memory = readExperienceMemory()) {
 
   return {
     entries,
-    boosted_queries: Array.from(new Set(entries.flatMap((entry) => entry.useful_queries || []))).slice(0, 4),
-    boosted_source_types: Array.from(new Set(entries.flatMap((entry) => entry.useful_source_types || []))).slice(0, 4),
-    avoided_patterns: Array.from(new Set(entries.flatMap((entry) => entry.noisy_paths || []))).slice(0, 4)
+    boosted_queries: collectRankedExperienceValues(
+      entries,
+      (entry) => [...(entry.useful_queries || []), ...(entry.learned_patterns?.follow_up_queries || [])],
+      { limit: 4, minLength: 2 }
+    ),
+    boosted_source_types: collectRankedExperienceValues(entries, (entry) => entry.useful_source_types || [], { limit: 4, minLength: 2 }),
+    avoided_patterns: collectRankedExperienceValues(entries, (entry) => entry.noisy_paths || [], { limit: 4, minLength: 3 }),
+    boosted_connector_ids: normalizeConnectorIdList(
+      collectRankedExperienceValues(entries, (entry) => entry.learned_patterns?.boosted_connector_ids || [], { limit: 6, minLength: 2 })
+    ),
+    avoided_connector_ids: normalizeConnectorIdList(
+      collectRankedExperienceValues(entries, (entry) => entry.learned_patterns?.avoided_connector_ids || [], { limit: 6, minLength: 2 })
+    ),
+    promoted_sites: collectRankedExperienceValues(entries, (entry) => entry.learned_patterns?.promoted_sites || [], { limit: 4, minLength: 3 })
   };
 }
 
-function buildSeedQueries(question, experienceHints = null) {
+function buildSeedQueries(question, experienceHints = null, siteHints = null) {
   const hints = buildEnglishQueryHints(question);
   const boostedQueries = (experienceHints?.boosted_queries || [])
     .filter((item) => normalizeText(item) !== normalizeText(question));
-  return Array.from(new Set([question, ...boostedQueries, ...hints])).slice(0, 4);
+  const siteQueries = buildSiteSeedQueries(question, siteHints, 2)
+    .filter((item) => normalizeText(item) !== normalizeText(question));
+  return Array.from(new Set([question, ...boostedQueries, ...siteQueries, ...hints])).slice(0, 6);
 }
 
 function scoreConnectorRelevance(question, connector) {
@@ -254,7 +1045,10 @@ function scoreConnectorRelevance(question, connector) {
   return score;
 }
 
-function inferPreferredConnectors(question, experienceHints = null) {
+function inferPreferredConnectors(question, experienceHints = null, siteHints = null) {
+  const hintedConnectorIds = new Set(inferConnectorIdsFromSiteHints(siteHints));
+  const boostedConnectorIds = new Set(experienceHints?.boosted_connector_ids || []);
+  const avoidedConnectorIds = new Set(experienceHints?.avoided_connector_ids || []);
   return [...sourceCatalog]
     .map((connector) => ({
       id: connector.id,
@@ -265,15 +1059,22 @@ function inferPreferredConnectors(question, experienceHints = null) {
           const blob = normalizeText([connector.id, connector.label, connector.description, ...(connector.capabilities || [])].join(" "));
           return blob.includes(normalizeText(hint));
         }) ? 1.5 : 0)
+        + (boostedConnectorIds.has(connector.id) ? 2 : 0)
+        - (avoidedConnectorIds.has(connector.id) ? 1.5 : 0)
+        + (hintedConnectorIds.has(connector.id) ? 2.5 : 0)
     }))
     .sort((left, right) => right.score - left.score)
     .slice(0, 4)
     .map(({ id, label, reason }) => ({ id, label, reason }));
 }
 
-function chooseConnectorsForQuestion(question, preferredConnectors, experienceHints = null) {
-  const preferred = preferredConnectors || inferPreferredConnectors(question, experienceHints);
-  const chosen = preferred.map((item) => item.id).filter(Boolean);
+function chooseConnectorsForQuestion(question, preferredConnectors, experienceHints = null, siteHints = null) {
+  const preferred = preferredConnectors || inferPreferredConnectors(question, experienceHints, siteHints);
+  const hintedConnectorIds = inferConnectorIdsFromSiteHints(siteHints).filter((id) => id && id !== "bing_web");
+  const avoidedConnectorIds = new Set(experienceHints?.avoided_connector_ids || []);
+  const chosen = [...hintedConnectorIds, ...preferred.map((item) => item.id)]
+    .filter(Boolean)
+    .filter((id) => id === "bing_web" || !avoidedConnectorIds.has(id));
 
   if (!chosen.includes("bing_web")) {
     chosen.push("bing_web");
@@ -388,6 +1189,30 @@ async function requestConnectorPlanFromModel(question, basePlan) {
           },
           required: ["id", "reason"]
         }
+      },
+      site_search_strategies: {
+        type: "array",
+        maxItems: 6,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            site_name: { type: "string" },
+            domain: { type: "string" },
+            connector_id: { type: "string", enum: connectorIds },
+            search_mode: {
+              type: "string",
+              enum: ["connector_search", "site_query", "hybrid", "verify_only"]
+            },
+            query_variants: {
+              type: "array",
+              maxItems: 4,
+              items: { type: "string" }
+            },
+            rationale: { type: "string" }
+          },
+          required: ["site_name", "search_mode", "query_variants", "rationale"]
+        }
       }
     },
     required: ["chosen_connector_ids", "rationale", "connector_reasons"]
@@ -399,6 +1224,9 @@ async function requestConnectorPlanFromModel(question, basePlan) {
     "Choose only from the provided connectors.",
     "Pick 2 to 4 connectors that are most likely to produce strong evidence for the question.",
     "Prefer primary or official sources when relevant, but do not force diversity if the topic strongly points to a smaller set.",
+    "If relevant site hints are provided, prefer those sites first: map known domains to their matching connector, or use bing_web for domain-specific discovery.",
+    "For each relevant hinted site, decide how to search it: connector_search (use in-site connector), site_query (use bing_web with site:domain), hybrid (do both), or verify_only (read only if needed later).",
+    "When returning site_search_strategies, write concrete query_variants that the agent can execute directly.",
     "Return 2 to 5 sub-questions and 2 to 6 concrete initial queries.",
     "Question:",
     question,
@@ -409,6 +1237,13 @@ async function requestConnectorPlanFromModel(question, basePlan) {
       required_evidence: basePlan.required_evidence,
       initial_queries: basePlan.initial_queries,
       preferred_connectors: basePlan.preferred_connectors,
+      search_site_hints: (basePlan.search_site_hints?.items || []).map((item) => ({
+        name: item.name,
+        domain: item.domain,
+        connector_id: item.connector_id,
+        category: item.category,
+        tags: item.tags
+      })),
       stop_policy: basePlan.stop_policy
     }, null, 2),
     "",
@@ -416,14 +1251,7 @@ async function requestConnectorPlanFromModel(question, basePlan) {
     JSON.stringify(connectors, null, 2)
   ].join("\n");
 
-  const response = await fetch(OPENAI_RESPONSES_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`
-    },
-    signal: AbortSignal.timeout(20000),
-    body: JSON.stringify({
+  const payload = await fetchOpenAIJsonWithRetry(apiKey, {
       model: DEFAULT_PLANNER_MODEL,
       store: false,
       input: prompt,
@@ -435,13 +1263,10 @@ async function requestConnectorPlanFromModel(question, basePlan) {
           schema
         }
       }
-    })
+    }, {
+    timeoutMs: 20000,
+    operation: "openai_planner"
   });
-
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload?.error?.message || `OpenAI planner failed with HTTP ${response.status}`);
-  }
 
   const rawText = extractTextFromResponsePayload(payload);
   if (!rawText) {
@@ -453,7 +1278,12 @@ async function requestConnectorPlanFromModel(question, basePlan) {
 
 function mergePlanWithModelSelection(basePlan, modelSelection) {
   const fallbackIds = basePlan.chosen_connector_ids || basePlan.preferred_connectors.map((item) => item.id);
-  const chosenConnectorIds = normalizeModelConnectorIds(modelSelection?.chosen_connector_ids, fallbackIds);
+  const siteSearchStrategies = normalizeModelSiteSearchStrategies(modelSelection?.site_search_strategies, basePlan);
+  const strategyConnectorIds = siteSearchStrategies.map((item) => item.connector_id).filter(Boolean);
+  const chosenConnectorIds = normalizeModelConnectorIds(
+    [...(modelSelection?.chosen_connector_ids || []), ...strategyConnectorIds],
+    fallbackIds
+  );
   const reasonMap = new Map((modelSelection?.connector_reasons || []).map((item) => [item.id, item.reason]));
   const subQuestions = compactStringList(modelSelection?.sub_questions, { minLength: 6, limit: 5 });
   const requiredEvidence = compactStringList(modelSelection?.required_evidence, { minLength: 4, limit: 6 });
@@ -481,12 +1311,17 @@ function mergePlanWithModelSelection(basePlan, modelSelection) {
     stop_policy: buildStopPolicy(basePlan.task_goal, subQuestions.length ? subQuestions : basePlan.sub_questions),
     preferred_connectors: preferredConnectors.length ? preferredConnectors : basePlan.preferred_connectors,
     chosen_connector_ids: chosenConnectorIds,
+    site_search_strategies: siteSearchStrategies,
     planner_mode: "llm",
     planner_rationale: modelSelection?.rationale || ""
   };
 }
 
-function planner(question, experienceHints = getRelevantExperienceHints(question)) {
+function planner(
+  question,
+  experienceHints = getRelevantExperienceHints(question),
+  siteHints = getRelevantSearchSiteHints(question)
+) {
   const comparisonQuery = /(相比|对比|差异|提升|versus|vs|update|更新)/i.test(question);
   const whyQuery = /(为什么|why|how)/i.test(question);
   const subQuestions = comparisonQuery
@@ -511,19 +1346,23 @@ function planner(question, experienceHints = getRelevantExperienceHints(question
     requiredEvidence.push("优先补充讨论或社区视角");
   }
 
-  const preferredConnectors = inferPreferredConnectors(question, experienceHints);
-  const chosenConnectorIds = chooseConnectorsForQuestion(question, preferredConnectors, experienceHints);
+  const preferredConnectors = inferPreferredConnectors(question, experienceHints, siteHints);
+  const chosenConnectorIds = chooseConnectorsForQuestion(question, preferredConnectors, experienceHints, siteHints);
 
   return {
     task_goal: question,
     sub_questions: subQuestions,
     required_evidence: requiredEvidence,
-    source_strategy: "LLM-Orchestrator selects connectors first, then routes candidates to specialist agents.",
+    source_strategy: siteHints?.items?.length
+      ? "LLM-Orchestrator first references curated site hints, then selects connectors and routes candidates to specialist agents."
+      : "LLM-Orchestrator selects connectors first, then routes candidates to specialist agents.",
     preferred_connectors: preferredConnectors,
     chosen_connector_ids: chosenConnectorIds,
     experience_hints: experienceHints,
+    search_site_hints: siteHints,
+    site_search_strategies: [],
     source_capabilities: sourceCatalog,
-    initial_queries: buildSeedQueries(question, experienceHints),
+    initial_queries: buildSeedQueries(question, experienceHints, siteHints),
     stop_policy: buildStopPolicy(question, subQuestions),
     stop_condition: "Stop when core questions are covered by evidence from at least two source types and conflicts are disclosed."
   };
@@ -531,7 +1370,8 @@ function planner(question, experienceHints = getRelevantExperienceHints(question
 
 async function buildPlan(question) {
   const experienceHints = getRelevantExperienceHints(question);
-  const basePlan = planner(question, experienceHints);
+  const siteHints = getRelevantSearchSiteHints(question);
+  const basePlan = planner(question, experienceHints, siteHints);
   try {
     const modelSelection = await requestConnectorPlanFromModel(question, basePlan);
     if (!modelSelection) {
@@ -610,14 +1450,7 @@ async function requestCandidateRoutingFromModel(question, plan, candidates) {
     })), null, 2)
   ].join("\n");
 
-  const response = await fetch(OPENAI_RESPONSES_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`
-    },
-    signal: AbortSignal.timeout(20000),
-    body: JSON.stringify({
+  const payload = await fetchOpenAIJsonWithRetry(apiKey, {
       model: DEFAULT_PLANNER_MODEL,
       store: false,
       input: prompt,
@@ -629,13 +1462,10 @@ async function requestCandidateRoutingFromModel(question, plan, candidates) {
           schema
         }
       }
-    })
+    }, {
+    timeoutMs: 20000,
+    operation: "openai_routing_planner"
   });
-
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload?.error?.message || `OpenAI routing planner failed with HTTP ${response.status}`);
-  }
 
   const rawText = extractTextFromResponsePayload(payload);
   if (!rawText) {
@@ -1181,14 +2011,7 @@ async function requestFinalSynthesisFromModel(question, mode, evidenceItems, ver
     }, null, 2)
   ].join("\n");
 
-  const response = await fetch(OPENAI_RESPONSES_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`
-    },
-    signal: AbortSignal.timeout(25000),
-    body: JSON.stringify({
+  const payload = await fetchOpenAIJsonWithRetry(apiKey, {
       model: DEFAULT_SYNTHESIS_MODEL,
       store: false,
       input: prompt,
@@ -1200,13 +2023,10 @@ async function requestFinalSynthesisFromModel(question, mode, evidenceItems, ver
           schema
         }
       }
-    })
+    }, {
+    timeoutMs: 25000,
+    operation: "openai_synthesis"
   });
-
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload?.error?.message || `OpenAI synthesis failed with HTTP ${response.status}`);
-  }
 
   const rawText = extractTextFromResponsePayload(payload);
   if (!rawText) {
@@ -1258,12 +2078,39 @@ async function synthesize(question, mode, candidates, reads, evidenceItems, veri
   }
 }
 
-function summarizeExperience(question, scratchpad, plan, evaluation, telemetry) {
+function summarizeExperience(question, scratchpad, plan, evaluation, telemetry, verification = { confirmations: [], conflicts: [], coverage_gaps: [] }) {
   const usefulPlatforms = [];
   const effectiveSearchTerms = [];
   const primarySourceSites = [];
   const efficientToolCombinations = [];
   const noisyPaths = [];
+  const successfulConnectorIds = compactStringList(
+    scratchpad.sources_read.map((item) => item.connector).filter(Boolean),
+    { minLength: 2, limit: 4 }
+  );
+  const failedConnectorIds = compactStringList(
+    (telemetry?.failures || []).map((item) => item.connector).filter(Boolean),
+    { minLength: 2, limit: 4 }
+  );
+  const promotedSites = compactStringList(
+    (telemetry?.ephemeral_tools || [])
+      .filter((item) => item.worth_promoting?.should_promote)
+      .map((item) => item.worth_promoting.candidate_connector),
+    { minLength: 3, limit: 4 }
+  );
+  const successfulEphemeralTools = (telemetry?.ephemeral_tools || []).filter((item) => item.success).length;
+  const failedEphemeralTools = (telemetry?.ephemeral_tools || []).filter((item) => !item.success).length;
+  const confidence = clampNumber(
+    evaluation?.scorecard?.readiness ?? (evaluation?.is_sufficient ? 0.72 : 0.42),
+    { min: 0, max: 1, fallback: 0.42 }
+  );
+  const qualityScore = Number(Math.max(0, Math.min(1,
+    confidence
+      + Math.min(0.12, ((evaluation?.metrics?.source_types_covered || 0) / 4) * 0.12)
+      - Math.min(0.25, (verification?.conflicts?.length || 0) * 0.08)
+      - Math.min(0.18, (verification?.coverage_gaps?.length || 0) * 0.04)
+  )).toFixed(2));
+  const roundsCompleted = scratchpad.workspace.timeline.filter((item) => item.type === "round_completed").length;
 
   // 分析平台适用性
   if (scratchpad.sources_read.length > 0) {
@@ -1334,13 +2181,23 @@ function summarizeExperience(question, scratchpad, plan, evaluation, telemetry) 
 
   return {
     created_at: new Date().toISOString(),
+    last_seen_at: new Date().toISOString(),
     question,
+    question_key: normalizeText(question),
+    run_count: 1,
+    success_count: evaluation?.is_sufficient ? 1 : 0,
     useful_queries: scratchpad.queries_tried.slice(0, 5),
     useful_source_types: Array.from(new Set(scratchpad.sources_read.map((item) => item.content_type || item.source_type))),
     useful_platforms: usefulPlatforms,
     effective_search_terms: effectiveSearchTerms,
     primary_source_sites: primarySourceSites,
     efficient_tool_combinations: efficientToolCombinations,
+    learned_patterns: {
+      boosted_connector_ids: successfulConnectorIds.length ? successfulConnectorIds : compactStringList(plan?.chosen_connector_ids, { minLength: 2, limit: 4 }),
+      avoided_connector_ids: failedConnectorIds,
+      follow_up_queries: compactStringList(evaluation?.follow_up_queries || [], { minLength: 2, limit: 4 }),
+      promoted_sites: promotedSites
+    },
     ephemeral_tool_insights: {
       attempts: telemetry?.ephemeral_tools?.length || 0,
       recovered_sources: (telemetry?.ephemeral_tools || []).filter((item) => item.success).map((item) => item.target?.url).filter(Boolean),
@@ -1353,6 +2210,19 @@ function summarizeExperience(question, scratchpad, plan, evaluation, telemetry) 
         }))
     },
     noisy_paths: noisyPaths,
+    metrics: {
+      quality_score: qualityScore,
+      confidence,
+      sufficiency: Boolean(evaluation?.is_sufficient),
+      rounds_completed: roundsCompleted,
+      sources_read: scratchpad.sources_read.length,
+      evidence_items: evaluation?.metrics?.evidence_items || 0,
+      confirmations: verification?.confirmations?.length || 0,
+      conflicts: verification?.conflicts?.length || 0,
+      coverage_gaps: verification?.coverage_gaps?.length || 0,
+      successful_ephemeral_tools: successfulEphemeralTools,
+      failed_ephemeral_tools: failedEphemeralTools
+    },
     note: evaluation.is_sufficient
       ? "This question is a good fit for the current llm-orchestrator-plus-specialists workflow."
       : "This question still exposes connector or evidence-model gaps that should be improved."
@@ -1390,13 +2260,40 @@ function buildFollowUpQueries(question, evaluation, scratchpad, experienceHints 
     .slice(0, 3);
 }
 
-function buildNextRoundConnectorIds(plan, currentConnectorIds, evaluation) {
+function buildNextRoundConnectorIds(plan, currentConnectorIds, evaluation, connectorHealth = {}) {
   const fallbackIds = compactStringList(
     currentConnectorIds?.length ? currentConnectorIds : (plan?.chosen_connector_ids || []),
     { limit: 4 }
   );
   const suggestedIds = compactStringList(evaluation?.suggested_connector_ids || [], { limit: 4 });
-  return normalizeModelConnectorIds(suggestedIds, fallbackIds);
+  const mergedIds = normalizeModelConnectorIds(suggestedIds, fallbackIds);
+  const healthyIds = mergedIds.filter((id) => connectorHealth?.[id]?.healthy !== false);
+  const unhealthyIds = mergedIds.filter((id) => connectorHealth?.[id]?.healthy === false);
+  const reserveIds = normalizeModelConnectorIds(
+    (plan?.source_capabilities || []).map((item) => item.id),
+    fallbackIds
+  ).filter((id) => !healthyIds.includes(id) && !unhealthyIds.includes(id) && connectorHealth?.[id]?.healthy !== false);
+  const filteredFallbackIds = (healthyIds.length || reserveIds.length)
+    ? fallbackIds.filter((id) => connectorHealth?.[id]?.healthy !== false)
+    : fallbackIds;
+
+  return normalizeModelConnectorIds([...healthyIds, ...reserveIds], [...filteredFallbackIds, ...reserveIds]);
+}
+
+function updateConnectorHealthSnapshot(telemetry, connectorIds, roundsCompleted = 0) {
+  const uniqueIds = Array.from(new Set((connectorIds || []).filter(Boolean)));
+  const discoverFailures = telemetry.failures.filter((item) => item.stage === "discover");
+  for (const connectorId of uniqueIds) {
+    const failures = telemetry.failures.filter((item) => item.connector === connectorId);
+    const failedEvents = failures.length + discoverFailures.length;
+    telemetry.connector_health[connectorId] = {
+      failed_events: failedEvents,
+      healthy: failedEvents < Math.max(2, roundsCompleted + 1),
+      rounds_observed: roundsCompleted,
+      last_failure: failures.length ? failures[failures.length - 1].reason : (discoverFailures[discoverFailures.length - 1]?.reason || null),
+      updated_at: new Date().toISOString()
+    };
+  }
 }
 
 async function emitProgress(onProgress, payload) {
@@ -1438,7 +2335,16 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
       })
     : null;
 
-  const candidates = await runWebResearcher(plan, queries, telemetry, runtime);
+  const searchResult = await runWebResearcher(plan, queries, telemetry, runtime);
+  const candidates = searchResult.candidates || [];
+  const executedSearchTasks = searchResult.executed_search_tasks || [];
+  if (executedSearchTasks.length) {
+    appendTimelineEvent(scratchpad, {
+      type: "site_search_strategy",
+      agent: "web_researcher",
+      search_tasks: executedSearchTasks
+    });
+  }
   if (!candidates.length) {
     for (const query of queries) {
       scratchpad.failure_paths.push({ query, reason: "no candidate returned" });
@@ -1539,6 +2445,7 @@ async function runRound(plan, question, queries, scratchpad, telemetry, onProgre
 
   return {
     candidates,
+    executed_search_tasks: executedSearchTasks,
     selected,
     routed_tasks: routedTasks,
     reads: [...reads, ...fallback.reads],
@@ -1678,10 +2585,13 @@ async function runResearch({ question, mode, onProgress }) {
       round: index + 1,
       queries,
       chosen_connector_ids: roundConnectorIds,
+      site_search_strategies: plan.site_search_strategies || [],
+      executed_search_tasks: round.executed_search_tasks || [],
       candidates_returned: round.candidates.length,
       selected_sources: round.selected.map((item) => ({
         id: item.id,
         title: item.title,
+        url: item.url,
         content_type: item.content_type || item.source_type,
         source_type: item.content_type || item.source_type,
         connector: item.connector
@@ -1703,6 +2613,7 @@ async function runResearch({ question, mode, onProgress }) {
       agent_reports: roundAgentReport
     };
     rounds.push(roundSummary);
+    updateConnectorHealthSnapshot(telemetry, roundConnectorIds, index + 1);
 
     await emitProgress(onProgress, {
       type: "round",
@@ -1717,6 +2628,11 @@ async function runResearch({ question, mode, onProgress }) {
       round: index + 1,
       evaluation
     });
+    await emitProgress(onProgress, {
+      type: "connector_health",
+      round: index + 1,
+      connector_health: telemetry.connector_health
+    });
 
     if (evaluation.stop_state?.should_stop_now) {
       telemetry.stop_reason = evaluation.stop_state.reason;
@@ -1724,7 +2640,7 @@ async function runResearch({ question, mode, onProgress }) {
     }
 
     if (evaluation.next_best_action === "run_follow_up_search") {
-      const nextConnectorIds = buildNextRoundConnectorIds(plan, roundConnectorIds, evaluation);
+      const nextConnectorIds = buildNextRoundConnectorIds(plan, roundConnectorIds, evaluation, telemetry.connector_health);
       if (nextConnectorIds.join("|") !== roundConnectorIds.join("|")) {
         recordDecision(scratchpad, {
           type: "connector_selection",
@@ -1762,13 +2678,7 @@ async function runResearch({ question, mode, onProgress }) {
     ...(plan.chosen_connector_ids || []),
     ...rounds.flatMap((item) => item.chosen_connector_ids || [])
   ]));
-  for (const connectorId of connectorIdsForHealth) {
-    const failures = telemetry.failures.filter((item) => item.connector === connectorId || item.stage === "discover");
-    telemetry.connector_health[connectorId] = {
-      failed_events: failures.length,
-      healthy: failures.length < Math.max(2, rounds.length + 1)
-    };
-  }
+  updateConnectorHealthSnapshot(telemetry, connectorIdsForHealth, rounds.length);
 
   await emitProgress(onProgress, {
     type: "synthesizing",
@@ -1797,10 +2707,20 @@ async function runResearch({ question, mode, onProgress }) {
     answer_sections: Object.keys(finalAnswer || {})
   });
   const knowledgeGraphExport = knowledgeGraph.export();
-  const experience = summarizeExperience(question, scratchpad, plan, evaluation, telemetry);
   const toolMemory = recordToolOutcome(telemetry.ephemeral_tools);
   const memory = readExperienceMemory();
-  writeExperienceMemory([experience, ...memory].slice(0, 30));
+  const experience = await finalizeExperienceMemory(
+    question,
+    scratchpad,
+    plan,
+    evaluation,
+    telemetry,
+    verification,
+    finalAnswer,
+    memory
+  );
+  const nextMemory = recordExperienceMemoryEntry(memory, experience, { limit: 30 });
+  writeExperienceMemory(nextMemory);
   writeKnowledgeGraph(knowledgeGraph);
 
   return {
@@ -1822,6 +2742,7 @@ async function runResearch({ question, mode, onProgress }) {
     agent_runtime: getAgentRuntimeSnapshot(agentRuntime),
     telemetry,
     tool_memory: toolMemory,
+    experience_overview: summarizeExperienceMemory(nextMemory),
     experience,
     final_answer: finalAnswer
   };
@@ -1831,6 +2752,10 @@ module.exports = {
   runResearch,
   getSamples,
   getExperienceMemory,
+  summarizeExperienceMemory,
+  listExperienceMemory,
+  setExperiencePinned,
+  clearExperienceMemory,
   getToolMemory,
   getToolAuditLog,
   getSourceCapabilities,
@@ -1847,6 +2772,17 @@ module.exports = {
     buildPlan,
     planner,
     getRelevantExperienceHints,
+    normalizeExperienceEntry,
+    mergeExperienceEntries,
+    recordExperienceMemoryEntry,
+    summarizeExperience,
+    requestExperienceMemoryFromModel,
+    applyExperienceMemoryModelOutput,
+    finalizeExperienceMemory,
+    summarizeExperienceMemory,
+    listExperienceMemory,
+    setExperiencePinned,
+    clearExperienceMemory,
     requestCandidateRoutingFromModel,
     selectCandidatesWithRouting,
     requestFinalSynthesisFromModel,
@@ -1863,8 +2799,11 @@ module.exports = {
     evaluator,
     buildFollowUpQueries,
     buildNextRoundConnectorIds,
+    updateConnectorHealthSnapshot,
+    fetchOpenAIJsonWithRetry,
     routeCandidate,
     createScratchpad,
-    updateQuestionStatus
+    updateQuestionStatus,
+    appendTimelineEvent
   }
 };

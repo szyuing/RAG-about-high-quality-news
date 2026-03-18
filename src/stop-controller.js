@@ -3,6 +3,8 @@ const { extractTextFromResponsePayload } = require("./openai-response");
 
 const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 const DEFAULT_EVALUATOR_MODEL = process.env.OPENAI_EVALUATOR_MODEL || "gpt-4o-mini";
+const OPENAI_MAX_ATTEMPTS = Math.max(1, Number(process.env.OPENSEARCH_OPENAI_MAX_ATTEMPTS || 2));
+const OPENAI_RETRY_BASE_MS = Math.max(100, Number(process.env.OPENSEARCH_OPENAI_RETRY_BASE_MS || 400));
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
@@ -10,6 +12,57 @@ function clamp01(value) {
 
 function unique(values) {
   return Array.from(new Set((values || []).filter(Boolean)));
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetriableOpenAIError(error, statusCode = null) {
+  if (typeof statusCode === "number") {
+    return statusCode === 429 || statusCode >= 500;
+  }
+  const message = String(error?.message || "");
+  return /timed out|timeout|fetch failed|network|ECONNRESET|ENOTFOUND|EAI_AGAIN|AbortError/i.test(message);
+}
+
+async function fetchOpenAIJsonWithRetry(apiKey, body, { timeoutMs = 25000, operation = "openai_stop_evaluator", maxAttempts = OPENAI_MAX_ATTEMPTS } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(OPENAI_RESPONSES_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey}`
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+        body: JSON.stringify(body)
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        const error = new Error(payload?.error?.message || `${operation} failed with HTTP ${response.status}`);
+        if (attempt < maxAttempts && isRetriableOpenAIError(error, response.status)) {
+          console.warn(`[${operation}] attempt ${attempt}/${maxAttempts} failed, retrying: ${error.message}`);
+          await wait(OPENAI_RETRY_BASE_MS * attempt);
+          continue;
+        }
+        throw error;
+      }
+
+      return payload;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts && isRetriableOpenAIError(error)) {
+        console.warn(`[${operation}] attempt ${attempt}/${maxAttempts} failed, retrying: ${error.message}`);
+        await wait(OPENAI_RETRY_BASE_MS * attempt);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError || new Error(`${operation} failed`);
 }
 
 function buildEvaluationScorecard(plan, evaluation, verification, roundsCompleted, stopDecision = null) {
@@ -223,14 +276,7 @@ async function requestStopDecisionFromModel(plan, evidenceItems, verification, h
     JSON.stringify(buildStopDecisionContext(plan, evidenceItems, verification, heuristicEvaluation, roundsCompleted), null, 2)
   ].join("\n");
 
-  const response = await fetch(OPENAI_RESPONSES_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`
-    },
-    signal: AbortSignal.timeout(25000),
-    body: JSON.stringify({
+  const payload = await fetchOpenAIJsonWithRetry(apiKey, {
       model: DEFAULT_EVALUATOR_MODEL,
       store: false,
       input: prompt,
@@ -242,13 +288,10 @@ async function requestStopDecisionFromModel(plan, evidenceItems, verification, h
           schema
         }
       }
-    })
+    }, {
+    timeoutMs: 25000,
+    operation: "openai_stop_evaluator"
   });
-
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload?.error?.message || `OpenAI evaluator failed with HTTP ${response.status}`);
-  }
 
   const rawText = extractTextFromResponsePayload(payload);
   if (!rawText) {

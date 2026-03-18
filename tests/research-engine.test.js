@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { __internal } = require("../src/source-connectors");
+const { __internal: researchInternal } = require("../src/research-engine");
 
 test("parseBingSearchMarkdown should extract title and decoded url", () => {
   const markdown = `
@@ -126,4 +127,33 @@ test("buildDouyinSearchUrl should generate search landing url", () => {
     url,
     "https://www.douyin.com/search/%E7%BE%8E%E5%9B%BD%E6%80%BB%E7%BB%9F%E7%89%B9%E6%9C%97%E6%99%AE%20%E6%BC%94%E8%AE%B2%E8%A7%86%E9%A2%91"
   );
+});
+
+
+test("fetchOpenAIJsonWithRetry should retry retriable non-JSON responses", async () => {
+  const originalFetch = global.fetch;
+  let attempts = 0;
+  global.fetch = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      return {
+        ok: false,
+        status: 502,
+        text: async () => "Bad Gateway"
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ id: "resp_1", output: [] })
+    };
+  };
+
+  try {
+    const payload = await researchInternal.fetchOpenAIJsonWithRetry("test-key", { input: "hello" }, { maxAttempts: 2, timeoutMs: 50, operation: "retry_test" });
+    assert.equal(attempts, 2);
+    assert.equal(payload.id, "resp_1");
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

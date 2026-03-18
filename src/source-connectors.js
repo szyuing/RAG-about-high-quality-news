@@ -1,4 +1,4 @@
-﻿const crypto = require("crypto");
+const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -144,7 +144,7 @@ function scoreToolForTask(tool, task = {}) {
   return score;
 }
 
-// 鏁版嵁杞崲宸ュ叿
+// 数据转换工具
 async function convertData(data, options = {}) {
   const {
     fromFormat = 'json',
@@ -156,7 +156,7 @@ async function convertData(data, options = {}) {
   } = options;
 
   try {
-    // 瑙ｆ瀽杈撳叆鏁版嵁
+    // 解析输入数据
     let parsedData = data;
     if (fromFormat === 'csv' && typeof data === 'string') {
       // CSV 杞?JSON
@@ -170,10 +170,11 @@ async function convertData(data, options = {}) {
         }, {});
       });
     } else if (fromFormat === 'json' && typeof data === 'string') {
-      // 瑙ｆ瀽 JSON 瀛楃涓?      parsedData = JSON.parse(data);
+      // 解析 JSON 字符串
+      parsedData = JSON.parse(data);
     }
 
-    // 搴旂敤杩囨护
+    // 应用过滤
     if (filter && typeof filter === 'object') {
       if (Array.isArray(parsedData)) {
         parsedData = parsedData.filter(item => {
@@ -184,7 +185,7 @@ async function convertData(data, options = {}) {
       }
     }
 
-    // 搴旂敤鏄犲皠
+    // 应用映射
     if (map && typeof map === 'object') {
       if (Array.isArray(parsedData)) {
         parsedData = parsedData.map(item => {
@@ -203,7 +204,7 @@ async function convertData(data, options = {}) {
       }
     }
 
-    // 搴旂敤鎺掑簭
+    // 应用排序
     if (sortBy && Array.isArray(parsedData)) {
       parsedData.sort((a, b) => {
         if (a[sortBy] < b[sortBy]) return -1;
@@ -212,7 +213,7 @@ async function convertData(data, options = {}) {
       });
     }
 
-    // 搴旂敤闄愬埗
+    // 应用限制
     if (limit && Array.isArray(parsedData)) {
       parsedData = parsedData.slice(0, limit);
     }
@@ -237,10 +238,10 @@ async function convertData(data, options = {}) {
         result = rows.join('\n');
       }
     } else if (toFormat === 'json') {
-      // 杈撳嚭 JSON
+      // 输出 JSON
       result = typeof parsedData === 'string' ? parsedData : JSON.stringify(parsedData, null, 2);
     } else {
-      // 鐩存帴杩斿洖鏁版嵁
+      // 直接返回数据
       result = parsedData;
     }
 
@@ -256,7 +257,7 @@ async function convertData(data, options = {}) {
   }
 }
 
-// API 娴嬭瘯宸ュ叿
+// API 测试工具
 async function testApiEndpoint(endpoint, options = {}) {
   const {
     method = 'GET',
@@ -326,7 +327,7 @@ async function testApiEndpoint(endpoint, options = {}) {
   }
 }
 
-// GitHub API 宸ュ叿
+// GitHub API 工具
 async function fetchGitHubRepoInfo(repo) {
   const [owner, repoName] = repo.split('/');
   if (!owner || !repoName) {
@@ -338,7 +339,7 @@ async function fetchGitHubRepoInfo(repo) {
   const contentsUrl = `https://api.github.com/repos/${owner}/${repoName}/contents`;
 
   try {
-    // 鑾峰彇浠撳簱鍩烘湰淇℃伅
+    // 获取仓库基本信息
     const repoResponse = await fetch(apiUrl, {
       headers: {
         'User-Agent': 'OpenSearch-Tool'
@@ -349,7 +350,7 @@ async function fetchGitHubRepoInfo(repo) {
     }
     const repoInfo = await repoResponse.json();
 
-    // 鑾峰彇README
+    // 获取README
     let readmeContent = '';
     try {
       const readmeResponse = await fetch(readmeUrl, {
@@ -365,7 +366,7 @@ async function fetchGitHubRepoInfo(repo) {
       // Ignore README fetch failures
     }
 
-    // 鑾峰彇鏂囦欢缁撴瀯
+    // 获取文件结构
     let fileStructure = [];
     try {
       const contentsResponse = await fetch(contentsUrl, {
@@ -416,7 +417,7 @@ const ToolRegistry = createToolRegistry({
   scoreToolForTask
 });
 
-// 娉ㄥ唽鍐呯疆宸ュ叿
+// 注册内置工具
 ToolRegistry.registerTool({
   id: 'fetch_github_repo',
   name: 'GitHub Repo Info',
@@ -426,7 +427,7 @@ ToolRegistry.registerTool({
       name: 'repo',
       type: 'string',
       required: true,
-      description: 'GitHub浠撳簱璺緞锛屾牸寮忎负 owner/repo'
+      description: 'GitHub仓库路径，格式为 owner/repo'
     }
   ],
   execute: async (input) => {
@@ -453,19 +454,19 @@ ToolRegistry.registerTool({
       name: 'url',
       type: 'string',
       required: true,
-      description: '鏂囨。URL'
+      description: '文档URL'
     },
     {
       name: 'markdown',
       type: 'string',
       required: false,
-      description: '鏂囨。鍐呭'
+      description: '文档内容'
     },
     {
       name: 'page_images',
       type: 'array',
       required: false,
-      description: '椤甸潰鍥惧儚URL鍒楄〃'
+      description: '页面图像URL列表'
     }
   ],
   execute: async (input) => {
@@ -478,7 +479,7 @@ ToolRegistry.registerTool({
 ToolRegistry.registerTool({
   id: 'layout_analysis',
   name: 'Document Layout Analysis',
-  description: '鍒嗘瀽鏂囨。甯冨眬锛岃瘑鍒枃鏈€佽〃鏍煎拰瑙嗚鍏冪礌',
+  description: '分析文档布局，识别文本、表格和视觉元素',
   parameters: [
     {
       name: 'candidate',
@@ -510,13 +511,13 @@ ToolRegistry.registerTool({
       name: 'url',
       type: 'string',
       required: false,
-      description: '鏂囨。URL'
+      description: '文档URL'
     },
     {
       name: 'title',
       type: 'string',
       required: false,
-      description: '鏂囨。鏍囬'
+      description: '文档标题'
     },
     {
       name: 'candidate',
@@ -554,7 +555,7 @@ ToolRegistry.registerTool({
       name: 'url',
       type: 'string',
       required: false,
-      description: '缃戦〉URL'
+      description: '网页URL'
     }
   ],
   execute: async (input) => {
@@ -639,19 +640,19 @@ ToolRegistry.registerTool({
       name: 'query',
       type: 'string',
       required: true,
-      description: '鎼滅储鏌ヨ'
+      description: '搜索查询'
     },
     {
       name: 'connector_ids',
       type: 'array',
       required: false,
-      description: '杩炴帴鍣↖D鍒楄〃'
+      description: '连接器ID列表'
     }
   ],
   execute: async (input) => {
     const { query, connectorIds } = input;
-    // 杩欓噷鍙互瀹炵幇鍏蜂綋鐨勬悳绱㈤€昏緫
-    // 鏆傛椂杩斿洖妯℃嫙鏁版嵁
+    // 这里可以实现具体的搜索逻辑
+    // 暂时返回模拟数据
     return [
       {
         id: 'search-1',
@@ -677,13 +678,13 @@ ToolRegistry.registerTool({
       name: 'endpoint',
       type: 'string',
       required: true,
-      description: 'API绔偣URL'
+      description: 'API端点URL'
     },
     {
       name: 'method',
       type: 'string',
       required: false,
-      description: 'HTTP鏂规硶锛岄粯璁や负GET'
+      description: 'HTTP方法，默认为GET'
     },
     {
       name: 'headers',
@@ -701,19 +702,19 @@ ToolRegistry.registerTool({
       name: 'timeout',
       type: 'number',
       required: false,
-      description: '璇锋眰瓒呮椂鏃堕棿锛堟绉掞級'
+      description: '请求超时时间（毫秒）'
     },
     {
       name: 'expectedStatus',
       type: 'number',
       required: false,
-      description: '鏈熸湜鐨凥TTP鐘舵€佺爜'
+      description: '期望的HTTP状态码'
     },
     {
       name: 'auth',
       type: 'object',
       required: false,
-      description: '璁よ瘉淇℃伅锛屾敮鎸乥asic鍜宐earer绫诲瀷'
+      description: '认证信息，支持basic和bearer类型'
     }
   ],
   execute: async (input) => {
@@ -741,43 +742,43 @@ ToolRegistry.registerTool({
 ToolRegistry.registerTool({
   id: 'convert_data',
   name: 'Data Converter',
-  description: '杞崲鏁版嵁鏍煎紡锛屾敮鎸丣SON鍜孋SV涔嬮棿鐨勮浆鎹紝浠ュ強鏁版嵁杩囨护銆佹槧灏勩€佹帓搴忓拰闄愬埗',
+  description: '转换数据格式，支持JSON和CSV之间的转换，以及数据过滤、映射、排序和限制',
   parameters: [
     {
       name: 'data',
       type: 'any',
       required: true,
-      description: '瑕佽浆鎹㈢殑鏁版嵁'
+      description: '要转换的数据'
     },
     {
       name: 'fromFormat',
       type: 'string',
       required: false,
-      description: '杈撳叆鏁版嵁鏍煎紡锛岄粯璁や负json'
+      description: '输入数据格式，默认为json'
     },
     {
       name: 'toFormat',
       type: 'string',
       required: false,
-      description: '杈撳嚭鏁版嵁鏍煎紡锛岄粯璁や负json'
+      description: '输出数据格式，默认为json'
     },
     {
       name: 'filter',
       type: 'object',
       required: false,
-      description: '杩囨护鏉′欢'
+      description: '过滤条件'
     },
     {
       name: 'map',
       type: 'object',
       required: false,
-      description: '瀛楁鏄犲皠'
+      description: '字段映射'
     },
     {
       name: 'sortBy',
       type: 'string',
       required: false,
-      description: '鎺掑簭瀛楁'
+      description: '排序字段'
     },
     {
       name: 'limit',
@@ -808,7 +809,7 @@ ToolRegistry.registerTool({
   status: 'active'
 });
 
-// 鍝旂珯瑙嗛闊抽涓嬭浇宸ュ叿
+// 哔站视频音频下载工具
 async function downloadBilibiliAudio(videoUrl, options = {}) {
   const {
     outputDir = './downloads',
@@ -817,7 +818,7 @@ async function downloadBilibiliAudio(videoUrl, options = {}) {
   } = options;
 
   try {
-    // 楠岃瘉URL鏍煎紡
+    // 验证URL格式
     const bvMatch = videoUrl.match(/BV[\w]+/);
     const avMatch = videoUrl.match(/av(\d+)/);
     
@@ -825,7 +826,7 @@ async function downloadBilibiliAudio(videoUrl, options = {}) {
       throw new Error('Invalid Bilibili video URL. Must contain BV or av ID');
     }
 
-    // 鑾峰彇瑙嗛椤甸潰鍐呭
+    // 获取视频页面内容
     const response = await fetch(videoUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -839,11 +840,11 @@ async function downloadBilibiliAudio(videoUrl, options = {}) {
 
     const html = await response.text();
 
-    // 鎻愬彇瑙嗛淇℃伅
+    // 提取视频信息
     const titleMatch = html.match(/<h1[^>]*title="([^"]*)"/);
     const title = titleMatch ? titleMatch[1].trim() : 'unknown';
 
-    // 鎻愬彇playinfo鏁版嵁
+    // 提取playinfo数据
     const playInfoMatch = html.match(/window\.__playinfo__\s*=\s*({[\s\S]*?})<\/script>/);
     if (!playInfoMatch) {
       throw new Error('Could not find playinfo data');
@@ -851,11 +852,11 @@ async function downloadBilibiliAudio(videoUrl, options = {}) {
 
     const playInfo = JSON.parse(playInfoMatch[1]);
     
-    // 鑾峰彇闊抽URL
+    // 获取音频URL
     let audioUrl = null;
     if (playInfo.data && playInfo.data.dash && playInfo.data.dash.audio) {
       const audios = playInfo.data.dash.audio;
-      // 閫夋嫨鏈€楂樿川閲忕殑闊抽
+      // 选择最高质量的音频
       audioUrl = audios[0].baseUrl;
     }
 
@@ -863,7 +864,7 @@ async function downloadBilibiliAudio(videoUrl, options = {}) {
       throw new Error('Could not find audio URL');
     }
 
-    // 涓嬭浇闊抽
+    // 下载音频
     const audioResponse = await fetch(audioUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -877,16 +878,17 @@ async function downloadBilibiliAudio(videoUrl, options = {}) {
 
     const audioBuffer = await audioResponse.arrayBuffer();
     
-    // 鐢熸垚鏂囦欢鍚?    const safeTitle = title.replace(/[^\w\s-]/g, '').replace(/\s+/g, '_');
+    // 生成文件名
+    const safeTitle = title.replace(/[^\w\s-]/g, '').replace(/\s+/g, '_');
     const fileName = `${safeTitle}_${Date.now()}.${format}`;
     const filePath = path.join(outputDir, fileName);
 
-    // 纭繚杈撳嚭鐩綍瀛樺湪
+    // 确保输出目录存在
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
     }
 
-    // 淇濆瓨闊抽鏂囦欢
+    // 保存音频文件
     fs.writeFileSync(filePath, Buffer.from(audioBuffer));
 
     return {
@@ -918,25 +920,25 @@ ToolRegistry.registerTool({
       name: 'videoUrl',
       type: 'string',
       required: true,
-      description: '鍝旂珯瑙嗛閾炬帴锛屾敮鎸丅V鎴朼v鏍煎紡'
+      description: '哔站视频链接，支持BV或av格式'
     },
     {
       name: 'outputDir',
       type: 'string',
       required: false,
-      description: '闊抽鏂囦欢淇濆瓨鐩綍锛岄粯璁や负./downloads'
+      description: '音频文件保存目录，默认为./downloads'
     },
     {
       name: 'quality',
       type: 'string',
       required: false,
-      description: '闊抽璐ㄩ噺锛岄粯璁や负high'
+      description: '音频质量，默认为high'
     },
     {
       name: 'format',
       type: 'string',
       required: false,
-      description: '闊抽鏍煎紡锛岄粯璁や负mp3'
+      description: '音频格式，默认为mp3'
     }
   ],
   execute: async (input) => {
@@ -958,7 +960,7 @@ ToolRegistry.registerTool({
   status: 'active'
 });
 
-// 鎶栭煶瑙嗛淇℃伅鎻愬彇宸ュ叿
+// 抖音视频信息提取工具
 async function extractDouyinVideoInfo(videoUrl, options = {}) {
   const {
     cookie = null,
@@ -966,13 +968,13 @@ async function extractDouyinVideoInfo(videoUrl, options = {}) {
   } = options;
 
   try {
-    // 楠岃瘉URL鏍煎紡
+    // 验证URL格式
     const douyinPattern = /douyin\.com|iesdouyin\.com/;
     if (!douyinPattern.test(videoUrl)) {
       throw new Error('Invalid Douyin video URL. Must be a douyin.com or iesdouyin.com link');
     }
 
-    // 澶勭悊鐭摼鎺ワ紝鑾峰彇鐪熷疄URL
+    // 处理短链接，获取真实URL
     let realUrl = videoUrl;
     let shortUrlRedirect = null;
     
@@ -987,24 +989,24 @@ async function extractDouyinVideoInfo(videoUrl, options = {}) {
         
         if (response.status === 302 || response.status === 301) {
           shortUrlRedirect = response.headers.get('location') || videoUrl;
-          // 妫€鏌ユ槸鍚︽槸搴旂敤鍗忚
+          // 检查是否是应用协议
           if (shortUrlRedirect && !shortUrlRedirect.startsWith('sslocal://')) {
             realUrl = shortUrlRedirect;
           }
         }
       } catch (e) {
-        // 鐭摼鎺ュ鐞嗗け璐ワ紝缁х画浣跨敤鍘熷URL
+        // 短链接处理失败，继续使用原始URL
       }
     }
 
-    // 鎻愬彇瑙嗛ID
+    // 提取视频ID
     const videoIdMatch = realUrl.match(/video\/(\d+)/);
     const videoId = videoIdMatch ? videoIdMatch[1] : null;
     
-    // 鏋勫缓鍒嗕韩閾炬帴
+    // 构建分享链接
     const shareUrl = videoId ? `https://v.douyin.com/${videoId}/` : videoUrl;
 
-    // 鑾峰彇瑙嗛椤甸潰鍐呭
+    // 获取视频页面内容
     const headers = {
       'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
       'Referer': 'https://www.douyin.com/'
@@ -1024,9 +1026,9 @@ async function extractDouyinVideoInfo(videoUrl, options = {}) {
 
     const html = await response.text();
 
-    // 鎻愬彇瑙嗛淇℃伅
+    // 提取视频信息
     const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/);
-    const title = titleMatch ? titleMatch[1].replace(' - 鎶栭煶', '').trim() : 'unknown';
+    const title = titleMatch ? titleMatch[1].replace(' - 抖音', '').trim() : 'unknown';
 
     // Extract video download url
     let videoDownloadUrl = null;
@@ -1059,14 +1061,14 @@ async function extractDouyinVideoInfo(videoUrl, options = {}) {
       if (renderDataMatch) {
         try {
           const renderData = JSON.parse(renderDataMatch[1]);
-          // 鍦ㄦ覆鏌撴暟鎹腑瀵绘壘瑙嗛URL
+          // 在渲染数据中寻找视频URL
           const videoData = findVideoUrlInObject(renderData);
           if (videoData) {
             videoDownloadUrl = videoData;
             extractionMethod = 'RENDER_DATA';
           }
         } catch (parseError) {
-          // 瑙ｆ瀽澶辫触
+          // 解析失败
         }
       }
     }
@@ -1159,7 +1161,7 @@ print(video_url)`,
         }
       ];
       
-      // 濡傛灉鏈塁ookie锛屾坊鍔燙ookie鏂规硶
+      // 如果有Cookie，添加Cookie方法
       if (!cookie && hasJsProtection) {
         downloadMethods.unshift({
           name: 'Use cookie authentication',
@@ -1192,9 +1194,9 @@ print(video_url)`,
         pageLength: html.length,
         extractionStatus: videoDownloadUrl ? 'success' : (hasJsProtection ? 'js_protection' : 'not_found'),
         suggestions: videoDownloadUrl ? [] : [
-          hasJsProtection ? '椤甸潰浣跨敤浜咼avaScript淇濇姢锛屽缓璁彁渚涙湁鏁堢殑Cookie' : null,
-          '鍙互灏濊瘯浣跨敤绗笁鏂逛笅杞藉伐鍏锋垨API',
-          '鍙互浣跨敤娴忚鍣ㄥ紑鍙戣€呭伐鍏锋墜鍔ㄨ幏鍙栬棰戝湴鍧€',
+          hasJsProtection ? '页面使用了JavaScript保护，建议提供有效的Cookie' : null,
+          '可以尝试使用第三方下载工具或API',
+          '可以使用浏览器开发者工具手动获取视频地址',
           'Try Selenium or Playwright browser automation as fallback'
         ].filter(Boolean),
         downloadMethods: videoDownloadUrl ? [] : downloadMethods,
@@ -1214,7 +1216,7 @@ print(video_url)`,
   }
 }
 
-// 鎵归噺鎻愬彇鎶栭煶瑙嗛淇℃伅
+// 批量提取抖音视频信息
 async function batchExtractDouyinVideoInfo(videoUrls, options = {}) {
   const {
     cookie = null,
@@ -1229,7 +1231,7 @@ async function batchExtractDouyinVideoInfo(videoUrls, options = {}) {
     const batch = videoUrls.slice(i, i + concurrency);
     
     const batchPromises = batch.map(async (url, index) => {
-      // 娣诲姞寤惰繜閬垮厤璇锋眰杩囧揩
+      // 添加延迟避免请求过快
       if (index > 0) {
         await new Promise(resolve => setTimeout(resolve, delay));
       }
@@ -1267,7 +1269,7 @@ async function batchExtractDouyinVideoInfo(videoUrls, options = {}) {
   };
 }
 
-// 杈呭姪鍑芥暟锛氬湪瀵硅薄涓€掑綊鏌ユ壘瑙嗛URL
+// 辅助函数：在对象中递归查找视频URL
 function findVideoUrlInObject(obj) {
   if (typeof obj !== 'object' || obj === null) {
     return null;
@@ -1300,7 +1302,7 @@ ToolRegistry.registerTool({
       name: 'videoUrl',
       type: 'string',
       required: true,
-      description: '鎶栭煶瑙嗛閾炬帴锛屾敮鎸乿.douyin.com鐭摼鎺ュ拰瀹屾暣閾炬帴'
+      description: '抖音视频链接，支持v.douyin.com短链接和完整链接'
     },
     {
       name: 'cookie',
@@ -1347,13 +1349,13 @@ ToolRegistry.registerTool({
       name: 'concurrency',
       type: 'number',
       required: false,
-      description: '骞跺彂鏁帮紝榛樿涓?'
+      description: '并发数，默认为3'
     },
     {
       name: 'delay',
       type: 'number',
       required: false,
-      description: '璇锋眰闂撮殧寤惰繜锛堟绉掞級锛岄粯璁や负1000'
+      description: '请求间隔延迟（毫秒），默认为1000'
     }
   ],
   execute: async (input) => {
@@ -1388,15 +1390,15 @@ async function downloadDouyinVideo(videoUrl, options = {}) {
   } = options;
 
   try {
-    // 楠岃瘉URL鏍煎紡
+    // 验证URL格式
     const douyinPattern = /douyin\.com|iesdouyin\.com/;
     if (!douyinPattern.test(videoUrl)) {
       throw new Error('Invalid Douyin video URL. Must be a douyin.com or iesdouyin.com link');
     }
 
-    console.log(`姝ｅ湪瑙ｆ瀽瑙嗛: ${videoUrl}`);
+    console.log(`正在解析视频: ${videoUrl}`);
     
-    // 璋冪敤瑙ｆ瀽API
+    // 调用解析API
     const apiEndpoint = `${apiUrl}?url=${encodeURIComponent(videoUrl)}`;
     
     const response = await fetch(apiEndpoint, {
@@ -1419,7 +1421,7 @@ async function downloadDouyinVideo(videoUrl, options = {}) {
 
     const videoData = data.data;
     
-    // 鑾峰彇瑙嗛涓嬭浇鍦板潃
+    // 获取视频下载地址
     const videoDownloadUrl = videoData.video || videoData.play_url || videoData.url;
     const coverUrl = videoData.cover;
     const title = videoData.title || 'douyin_video';
@@ -1429,10 +1431,10 @@ async function downloadDouyinVideo(videoUrl, options = {}) {
       throw new Error('No video URL found in API response');
     }
 
-    console.log(`瑙ｆ瀽鎴愬姛锛屽噯澶囦笅杞? ${title}`);
-    console.log(`瑙嗛鍦板潃: ${videoDownloadUrl}`);
+    console.log(`解析成功，准备下载: ${title}`);
+    console.log(`视频地址: ${videoDownloadUrl}`);
 
-    // 鍒涘缓涓嬭浇鐩綍
+    // 创建下载目录
     const fs = require('fs');
     const path = require('path');
     
@@ -1446,8 +1448,8 @@ async function downloadDouyinVideo(videoUrl, options = {}) {
     const finalFilename = filename || `${safeAuthor}_${safeTitle}_${Date.now()}.mp4`;
     const outputPath = path.join(outputDir, finalFilename);
 
-    // 涓嬭浇瑙嗛
-    console.log(`寮€濮嬩笅杞藉埌: ${outputPath}`);
+    // 下载视频
+    console.log(`开始下载到: ${outputPath}`);
     
     const videoResponse = await fetch(videoDownloadUrl, {
       headers: {
@@ -1460,14 +1462,14 @@ async function downloadDouyinVideo(videoUrl, options = {}) {
       throw new Error(`Video download failed: ${videoResponse.status}`);
     }
 
-    // 鑾峰彇瑙嗛娴佸苟淇濆瓨
+    // 获取视频流并保存
     const arrayBuffer = await videoResponse.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     
     fs.writeFileSync(outputPath, buffer);
     
     const fileSize = (buffer.length / 1024 / 1024).toFixed(2);
-    console.log(`涓嬭浇瀹屾垚! 鏂囦欢澶у皬: ${fileSize} MB`);
+    console.log(`下载完成! 文件大小: ${fileSize} MB`);
 
     return {
       success: true,
@@ -1484,7 +1486,7 @@ async function downloadDouyinVideo(videoUrl, options = {}) {
     };
 
   } catch (error) {
-    console.error('涓嬭浇澶辫触:', error.message);
+    console.error('下载失败:', error.message);
     return {
       success: false,
       error: error.message
@@ -1492,7 +1494,7 @@ async function downloadDouyinVideo(videoUrl, options = {}) {
   }
 }
 
-// 鎵归噺涓嬭浇鎶栭煶瑙嗛
+// 批量下载抖音视频
 async function batchDownloadDouyinVideos(videoUrls, options = {}) {
   const {
     outputDir = './downloads',
@@ -1507,12 +1509,12 @@ async function batchDownloadDouyinVideos(videoUrls, options = {}) {
     const batch = videoUrls.slice(i, i + concurrency);
     
     const batchPromises = batch.map(async (url, index) => {
-      // 娣诲姞寤惰繜閬垮厤璇锋眰杩囧揩
+      // 添加延迟避免请求过快
       if (index > 0) {
         await new Promise(resolve => setTimeout(resolve, delay));
       }
       
-      console.log(`\n[${i + index + 1}/${videoUrls.length}] 寮€濮嬪鐞? ${url}`);
+      console.log(`\n[${i + index + 1}/${videoUrls.length}] 开始处理: ${url}`);
       
       const result = await downloadDouyinVideo(url, { outputDir });
       return {
@@ -1754,7 +1756,7 @@ function buildSectionsFromMarkdown(markdown) {
       continue;
     }
     if (!current) {
-      current = { heading: "鎽樿", excerpt: line };
+      current = { heading: "摘要", excerpt: line };
       continue;
     }
     if (!current.excerpt) {
@@ -2545,14 +2547,14 @@ function buildTranscriptTimeline(cues) {
     return {
       start: timestampFromMilliseconds(segment.start * 1000),
       end: timestampFromMilliseconds(segment.end * 1000),
-      title: segment.texts[0]?.slice(0, 42) || "鐗囨",
+      title: segment.texts[0]?.slice(0, 42) || "片段",
       summary: summary.length > 0 ? summary[0] : fullText.slice(0, 220),
       full_text: fullText.slice(0, 500)
     };
   });
 }
 
-// 鎻愬彇瑙嗛鍏抽敭瑙傜偣鍜屾椂闂寸偣
+// 提取视频关键观点和时间点
 function extractVideoKeyPoints(transcript, maxPoints = 8) {
   if (!transcript || transcript.length === 0) {
     return [];
@@ -2630,7 +2632,7 @@ function classifyKeyPoint(text) {
   return "insight";
 }
 
-// 瑙嗛杞琈P3鍔熻兘
+// 视频转MP3功能
 async function convertVideoToMp3(videoUrl, outputPath) {
   return new Promise((resolve, reject) => {
     const ytDlpPath = path.join(os.tmpdir(), "yt-dlp.exe");
@@ -2657,7 +2659,7 @@ async function convertVideoToMp3(videoUrl, outputPath) {
       if (code === 0) {
         resolve(outputPath);
       } else {
-        reject(new Error(`瑙嗛杞琈P3澶辫触: ${error}`));
+        reject(new Error(`视频转MP3失败: ${error}`));
       }
     });
 
@@ -2691,10 +2693,10 @@ async function transcribeWithArsApi(audioPath) {
   return await response.json();
 }
 
-// 閫氳繃寮€婧愭ā鍨嬭浆鏂囨湰
+// 通过开源模型转文本
 async function transcribeWithOpenSourceModel(audioPath) {
   if (!VIDEO_PROCESSING_CONFIG.openSourceModel.enabled) {
-    throw new Error("寮€婧愭ā鍨嬫湭閰嶇疆鎴栨湭鍚敤");
+    throw new Error("开源模型未配置或未启用");
   }
 
   const formData = new FormData();
@@ -2707,13 +2709,13 @@ async function transcribeWithOpenSourceModel(audioPath) {
   });
 
   if (!response.ok) {
-    throw new Error(`寮€婧愭ā鍨嬭皟鐢ㄥけ璐? ${await response.text()}`);
+    throw new Error(`开源模型调用失败: ${await response.text()}`);
   }
 
   return await response.json();
 }
 
-// 瑙嗛杞枃鏈富鍑芥暟
+// 视频转文本主函数
 async function transcribeVideo(videoUrl) {
   const tempDir = os.tmpdir();
   const audioPath = path.join(tempDir, `audio_${Date.now()}.mp3`);
@@ -2735,7 +2737,7 @@ async function transcribeVideo(videoUrl) {
           key_points: keyPoints
         };
       } catch (arsError) {
-        console.warn("ARS API 璋冪敤澶辫触锛屽皾璇曚娇鐢ㄥ紑婧愭ā鍨?", arsError.message);
+        console.warn("ARS API 调用失败，尝试使用开源模型", arsError.message);
       }
     }
 
@@ -2798,7 +2800,7 @@ function parseBingSearchMarkdown(markdown, query) {
       .filter((line) => line && !/^[-=]{3,}$/.test(line));
 
     const summaryLine = rest.join(" ").replace(/\s+/g, " ").trim();
-    const publishedMatch = summaryLine.match(/^([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})路\s*/);
+    const publishedMatch = summaryLine.match(/^([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})·\s*/);
     const summary = publishedMatch ? summaryLine.replace(publishedMatch[0], "") : summaryLine;
     if (!summary || /Can't use this link|Unable to process this search/i.test(summary)) {
       continue;
@@ -2933,7 +2935,7 @@ function parseBilibiliSearchHtml(html, query) {
       duration,
       engagement: null,
       authority_score: 0.76,
-      summary: `Bilibili 瑙嗛缁撴灉锛?{title}`,
+      summary: `Bilibili 视频结果：${title}`,
       matched_query: query,
       score: Number(((chineseQuery ? 0.94 : 0.68) - index * 0.05).toFixed(4)),
       metadata: {
@@ -3087,19 +3089,19 @@ async function searchBilibili(query) {
 
 async function searchDouyin(query) {
   const normalizedQuery = normalizeWhitespace(String(query || "").replace(/\s+/g, " "));
-  const finalQuery = /瑙嗛/.test(normalizedQuery) ? normalizedQuery : `${normalizedQuery} 瑙嗛`;
+  const finalQuery = /视频/.test(normalizedQuery) ? normalizedQuery : `${normalizedQuery} 视频`;
   const url = buildDouyinSearchUrl(query);
 
   return [
     {
       id: makeId("video", url),
       connector: "douyin",
-      title: `${finalQuery} - 鎶栭煶鎼滅储`,
+      title: `${finalQuery} - 抖音搜索`,
       url,
-      platform: "鎶栭煶",
+      platform: "抖音",
       content_type: "video",
       source_type: "video",
-      author: "鎶栭煶",
+      author: "抖音",
       published_at: null,
       duration: null,
       engagement: null,
@@ -3306,7 +3308,7 @@ async function readSegmentFaultSource(candidate) {
   const markdown = [
     `# ${candidate.title}`,
     "",
-    candidate.published_at ? `鍙戝竷鏃堕棿锛?{candidate.published_at}` : "",
+    candidate.published_at ? `发布时间：${candidate.published_at}` : "",
     candidate.summary,
     "",
     stripTags(articleHtml)
@@ -3336,8 +3338,8 @@ async function readITHomeSource(candidate) {
   const markdown = [
     `# ${candidate.title}`,
     "",
-    candidate.published_at ? `鍙戝竷鏃堕棿锛?{candidate.published_at}` : "",
-    descriptionMatch ? `鎽樿锛?{decodeHtmlEntities(descriptionMatch[1])}` : "",
+    candidate.published_at ? `发布时间：${candidate.published_at}` : "",
+    descriptionMatch ? `摘要：${decodeHtmlEntities(descriptionMatch[1])}` : "",
     "",
     stripTags(contentHtml)
   ].filter(Boolean).join("\n");
@@ -3369,7 +3371,7 @@ async function readArxivSource(candidate) {
       const abstract = abstractMatch ? abstractMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : candidate.summary;
       const authors = authorsMatch ? authorsMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : candidate.author;
       const history = historyMatch ? historyMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "";
-      const markdown = [`# ${candidate.title}`, "", `浣滆€咃細${authors}`, candidate.published_at ? `鍙戝竷鏃堕棿锛?{candidate.published_at}` : "", history ? `鎻愪氦鍘嗗彶锛?{history}` : "", "", abstract].filter(Boolean).join("\n");
+      const markdown = [`# ${candidate.title}`, "", `作者：${authors}`, candidate.published_at ? `发布时间：${candidate.published_at}` : "", history ? `提交历史：${history}` : "", "", abstract].filter(Boolean).join("\n");
       return {
         source_id: candidate.id,
         content_type: candidate.content_type || candidate.source_type,
@@ -3670,7 +3672,7 @@ function parseDouyinRenderedPage(payload) {
     .map((line) => normalizeWhitespace(line))
     .filter(Boolean);
 
-  const title = normalizeWhitespace((payload.heading || payload.title || "").replace(/\s*-\s*鎶栭煶$/, ""));
+  const title = normalizeWhitespace((payload.heading || payload.title || "").replace(/\s*-\s*抖音$/, ""));
   const publishedLine = lines.find((line) => /^发布时间[:：]/.test(line)) || "";
   const publishedAtLabel = publishedLine ? normalizeWhitespace(publishedLine.replace(/^发布时间[:：]\s*/, "")) : null;
   const publishedAt = formatDouyinPublishedAt(publishedAtLabel);
@@ -3680,7 +3682,7 @@ function parseDouyinRenderedPage(payload) {
   if (!author && publishedIndex !== -1) {
     for (let index = publishedIndex + 1; index < Math.min(lines.length, publishedIndex + 6); index += 1) {
       const line = lines[index];
-      if (!line || /^(绮変笣|鑾疯禐|鍏虫敞|鎺ㄨ崘瑙嗛|涓炬姤|绉佷俊|鐐瑰嚮鍔犺浇鏇村)/.test(line)) {
+      if (!line || /^(粉丝|获赞|关注|推荐视频|举报|私信|点击加载更多)/.test(line)) {
         continue;
       }
       author = line;
@@ -3692,12 +3694,12 @@ function parseDouyinRenderedPage(payload) {
   if (author && publishedIndex !== -1) {
     const authorIndex = lines.findIndex((line, index) => index > publishedIndex && line === author);
     if (authorIndex !== -1) {
-      authorStats = lines.slice(authorIndex + 1, authorIndex + 4).find((line) => /绮変笣|鑾疯禐/.test(line)) || null;
+      authorStats = lines.slice(authorIndex + 1, authorIndex + 4).find((line) => /粉丝|获赞/.test(line)) || null;
     }
   }
 
   const metrics = [];
-  const reportIndex = lines.findIndex((line) => line === "涓炬姤");
+  const reportIndex = lines.findIndex((line) => line === "举报");
   if (reportIndex !== -1) {
     for (let index = reportIndex - 1; index >= 0 && metrics.length < 4; index -= 1) {
       const line = lines[index];
@@ -3711,7 +3713,7 @@ function parseDouyinRenderedPage(payload) {
     }
   }
 
-  const chapterIndex = lines.findIndex((line) => line === "绔犺妭瑕佺偣");
+  const chapterIndex = lines.findIndex((line) => line === "章节要点");
   const timeline = [];
   if (chapterIndex !== -1) {
     for (let index = chapterIndex + 1; index < Math.min(lines.length, chapterIndex + 20); index += 1) {
@@ -3733,7 +3735,7 @@ function parseDouyinRenderedPage(payload) {
   }
 
   const primaryVideo = (payload.videos || []).find((video) => video?.src) || (payload.videos || [])[0] || null;
-  const seriesTitle = (payload.subheadings || []).find((heading) => heading && heading !== "鎺ㄨ崘瑙嗛") || null;
+  const seriesTitle = (payload.subheadings || []).find((heading) => heading && heading !== "推荐视频") || null;
 
   return {
     title: title || null,
@@ -3793,7 +3795,7 @@ async function readBilibiliSource(candidate) {
     "",
     description,
     "",
-    `鎾斁锛?{stats.view || 0}锛岀偣璧烇細${stats.like || 0}锛岃瘎璁猴細${stats.reply || 0}锛屾敹钘忥細${stats.favorite || 0}`
+    `播放：${stats.view || 0}，点赞：${stats.like || 0}，评论：${stats.reply || 0}，收藏：${stats.favorite || 0}`
   ].filter(Boolean).join("\n");
 
   return {
@@ -3845,9 +3847,9 @@ async function readDouyinSource(candidate) {
           if (desc) {
             keyPoints.push([
               desc,
-              author ? `浣滆€咃細${author}` : "",
-              plays ? `鎾斁锛?{plays}` : "",
-              likes ? `鐐硅禐锛?{likes}` : ""
+              author ? `作者：${author}` : "",
+              plays ? `播放：${plays}` : "",
+              likes ? `点赞：${likes}` : ""
             ].filter(Boolean).join(" | "));
           }
         }
@@ -4202,7 +4204,7 @@ async function executeReadTool(toolId, input) {
   return connector.read(candidate);
 }
 
-// 娉ㄥ唽鏍稿績宸ュ叿
+// 注册核心工具
 ToolRegistry.registerTool({
   id: 'layout_analysis',
   name: 'Layout Analysis',
@@ -4406,7 +4408,7 @@ ToolRegistry.registerTool({
   }
 });
 
-// 鍥炬枃鐞嗚В宸ュ叿
+// 图文理解工具
 ToolRegistry.registerTool({
   id: 'analyze_image',
   name: 'Analyze Image',
@@ -4466,7 +4468,7 @@ ToolRegistry.registerTool({
   }
 });
 
-// 鍥炬枃鎼滅储宸ュ叿
+// 图文搜索工具
 ToolRegistry.registerTool({
   id: 'image_search',
   name: 'Image Search',
@@ -4517,7 +4519,7 @@ ToolRegistry.registerTool({
   }
 });
 
-// 鎼滅储宸ュ叿
+// 搜索工具
 ToolRegistry.registerTool({
   id: 'search_sources',
   name: 'Search Sources',

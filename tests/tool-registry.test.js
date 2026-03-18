@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { createToolRegistry } = require("../src/tool-registry-core");
 const { ToolRegistry } = require("../src/source-connectors");
 const {
   runSpecialistReads,
@@ -8,6 +9,84 @@ const {
   routeCandidate,
   collectorToolForCandidate
 } = require("../src/agent-orchestrator");
+
+test("createToolRegistry executeTool should retry transient failures before succeeding", async () => {
+  let attempts = 0;
+  const registry = createToolRegistry({
+    normalizeCapability: (value) => String(value || "").trim().toLowerCase(),
+    scoreToolForTask(tool, task = {}) {
+      return tool.id === task.preferred_tool_id ? 10 : 1;
+    }
+  });
+
+  registry.registerTool({
+    id: "primary_reader",
+    name: "Primary Reader",
+    parameters: [],
+    async execute() {
+      attempts += 1;
+      if (attempts < 2) {
+        throw new Error("network timeout while reading source");
+      }
+      return { source_id: "retry-source", tool: "primary_reader" };
+    }
+  });
+
+  const execution = await registry.executeTool("primary_reader", {}, { maxAttempts: 2 });
+  assert.equal(execution.success, true);
+  assert.equal(execution.toolId, "primary_reader");
+  assert.equal(attempts, 2);
+  assert.equal(execution.meta.fallback_used, false);
+  assert.equal(execution.meta.attempts.length, 1);
+  assert.equal(execution.meta.attempts[0].error_type, "timeout");
+});
+
+test("createToolRegistry executeTool should fall back to a backup tool on non-retriable failures", async () => {
+  const calls = [];
+  const registry = createToolRegistry({
+    normalizeCapability: (value) => String(value || "").trim().toLowerCase(),
+    scoreToolForTask(tool, task = {}) {
+      if (tool.id === task.preferred_tool_id) {
+        return 10;
+      }
+      if (tool.id === "fallback_reader") {
+        return 9;
+      }
+      return 1;
+    }
+  });
+
+  registry.registerTool({
+    id: "primary_reader",
+    name: "Primary Reader",
+    parameters: [],
+    async execute() {
+      calls.push("primary_reader");
+      throw new Error("Unsupported connector: demo_source");
+    }
+  });
+  registry.registerTool({
+    id: "fallback_reader",
+    name: "Fallback Reader",
+    parameters: [],
+    async execute() {
+      calls.push("fallback_reader");
+      return { source_id: "fallback-source", tool: "fallback_reader" };
+    }
+  });
+
+  const execution = await registry.executeTool("primary_reader", { candidate: { content_type: "web", source_type: "web" } }, {
+    agent: "long_text_collector",
+    capability: "read_web_page",
+    fallbackToolIds: ["fallback_reader"]
+  });
+  assert.equal(execution.success, true);
+  assert.equal(execution.toolId, "fallback_reader");
+  assert.deepEqual(calls, ["primary_reader", "fallback_reader"]);
+  assert.equal(execution.meta.fallback_used, true);
+  assert.equal(execution.meta.attempts[0].error_type, "unsupported_source");
+  assert.deepEqual(execution.meta.fallback_chain, ["fallback_reader"]);
+});
 
 test("ToolRegistry should expose core capabilities and enforce custom validation", () => {
   const capabilityIds = ToolRegistry.getToolCapabilities().map((item) => item.id);
