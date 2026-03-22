@@ -1192,7 +1192,8 @@ const toolPlatformApi = {
   validateToolResult: buildValidation,
   recordToolOutcome,
   promoteToolCandidate,
-  readAuditLog
+  readAuditLog,
+  appendAuditEvent
 };
 
 module.exports = {
@@ -1208,5 +1209,6 @@ module.exports = {
   requestToolCreation,
   runEphemeralTool,
   readToolMemory,
-  readAuditLog
+  readAuditLog,
+  appendAuditEvent
 };

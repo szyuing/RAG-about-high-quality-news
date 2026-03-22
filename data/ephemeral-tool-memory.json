@@ -1,14 +1,53 @@
 {
-  "updated_at": "2026-03-18T02:39:52.565Z",
+  "updated_at": "2026-03-21T09:20:44.917Z",
   "site_patterns": [
     {
       "site_key": "unknown",
-      "attempts": 8,
-      "success_count": 8,
+      "attempts": 10,
+      "success_count": 10,
       "last_strategy": null,
       "last_failure": null
+    },
+    {
+      "site_key": "normalized_read_generator",
+      "attempts": 51,
+      "success_count": 51,
+      "last_strategy": "normalized_read_generator",
+      "last_failure": null
+    },
+    {
+      "site_key": "zhihu.com",
+      "attempts": 4,
+      "success_count": 0,
+      "last_strategy": "video_metadata_extractor",
+      "last_failure": "HTTP 403"
     }
   ],
   "reusable_patterns": [],
-  "avoid_patterns": []
+  "avoid_patterns": [
+    {
+      "created_at": "2026-03-18T09:14:43.077Z",
+      "site_key": "zhihu.com",
+      "strategy": "video_metadata_extractor",
+      "failure_mode": "HTTP 403"
+    },
+    {
+      "created_at": "2026-03-18T09:23:31.864Z",
+      "site_key": "zhihu.com",
+      "strategy": "video_metadata_extractor",
+      "failure_mode": "HTTP 403"
+    },
+    {
+      "created_at": "2026-03-18T09:23:31.864Z",
+      "site_key": "zhihu.com",
+      "strategy": "video_metadata_extractor",
+      "failure_mode": "HTTP 403"
+    },
+    {
+      "created_at": "2026-03-18T09:23:31.864Z",
+      "site_key": "zhihu.com",
+      "strategy": "video_metadata_extractor",
+      "failure_mode": "HTTP 403"
+    }
+  ]
 }

@@ -1,10 +1,10 @@
-const test = require("node:test");
+﻿const test = require("node:test");
 const assert = require("node:assert/strict");
 const { __internal: researchInternal } = require("../src/research-engine");
 const { __internal: sourceInternal } = require("../src/source-connectors");
 
 test("planner should choose a bounded connector set before discovery", () => {
-  const plan = researchInternal.planner("美国总统特朗普 演讲视频");
+  const plan = researchInternal.planner("缂囧骸娴楅幀鑽ょ埠閻楄婀曢弲?濠曟棁顔夌憴鍡涱暥");
 
   assert.ok(Array.isArray(plan.preferred_connectors));
   assert.ok(Array.isArray(plan.chosen_connector_ids));
@@ -13,7 +13,7 @@ test("planner should choose a bounded connector set before discovery", () => {
   assert.ok(plan.chosen_connector_ids.includes("bing_web"));
   assert.deepEqual(
     plan.chosen_connector_ids,
-    researchInternal.chooseConnectorsForQuestion("美国总统特朗普 演讲视频", plan.preferred_connectors)
+    researchInternal.chooseConnectorsForQuestion("缂囧骸娴楅幀鑽ょ埠閻楄婀曢弲?濠曟棁顔夌憴鍡涱暥", plan.preferred_connectors)
   );
   assert.equal(plan.stop_policy.max_rounds, 2);
   assert.equal(plan.stop_policy.min_source_types, 2);
@@ -198,45 +198,168 @@ test("recordExperienceMemoryEntry should merge repeated questions instead of app
   assert.ok(merged[0].learned_patterns.boosted_connector_ids.includes("bing_web"));
 });
 
-test("mergePlanWithModelSelection should replace chosen connectors with model order", () => {
-  const basePlan = researchInternal.planner("美国总统特朗普 演讲视频");
-  const merged = researchInternal.mergePlanWithModelSelection(basePlan, {
-    chosen_connector_ids: ["douyin", "ted"],
-    site_search_strategies: [
-      {
-        site_name: "Douyin",
-        domain: "douyin.com",
-        connector_id: "douyin",
-        search_mode: "hybrid",
-        query_variants: ["特朗普 演讲 抖音", "Trump speech Douyin"],
-        rationale: "Use both in-site video search and web discovery."
-      }
-    ],
-    rationale: "video-first",
-    connector_reasons: [
-      { id: "douyin", reason: "short-form Chinese clips" },
-      { id: "ted", reason: "long-form talks" }
-    ]
-  });
+test("buildPlannerPrompt should keep six-step guidance and omit planner connector output fields", () => {
+  const basePlan = researchInternal.buildLlmPlanningContext("DeepSeek 发布 v4 模型");
+  const prompt = researchInternal.buildPlannerPrompt("DeepSeek 发布 v4 模型", basePlan);
 
-  assert.equal(merged.planner_mode, "llm");
-  assert.deepEqual(merged.chosen_connector_ids.slice(0, 2), ["douyin", "ted"]);
-  assert.ok(merged.chosen_connector_ids.includes("bing_web"));
-  assert.equal(merged.preferred_connectors[0].id, "douyin");
-  assert.equal(merged.preferred_connectors[0].reason, "short-form Chinese clips");
-  assert.equal(merged.site_search_strategies[0].search_mode, "hybrid");
-  assert.equal(merged.site_search_strategies[0].connector_id, "douyin");
+  assert.match(prompt, /Step 1｜拆解问题/);
+  assert.match(prompt, /Step 6｜获取并提取答案/);
+  assert.match(prompt, /不要从 connector availability 出发做规划/);
+  assert.match(prompt, /自动补全时，优先补全会直接改变答案定位方式的缺失约束/);
+  assert.match(prompt, /如果问题是在问精确措辞、最后一句、某段对话、某一结尾内容/);
+  assert.ok(prompt.includes("site_search_strategies 对应 Step 4 + Step 5"));
+  assert.match(prompt, /runtime 后续可能会为高价值未覆盖域名 provision generated site connector/);
+  assert.doesNotMatch(prompt, /chosen_connector_ids 只是轻量运行提示/);
+  assert.doesNotMatch(prompt, /chosen_connector_ids 的顺序代表推荐执行优先级/);
+  assert.doesNotMatch(prompt, /connector_reasons 应解释排序依据/);
 });
 
-test("buildPlan should fall back cleanly when OPENAI_API_KEY is absent", async () => {
+test("mergePlanWithModelSelection should accept planner outputs without connector picks", () => {
+  const basePlan = researchInternal.buildLlmPlanningContext("DeepSeek 发布 v4 模型");
+  const merged = researchInternal.mergePlanWithModelSelection(basePlan, {
+    sub_questions: ["是否真的发布了 V4？", "官方证据在哪里？"],
+    required_evidence: ["官网或官方博客公告", "仓库或文档中的一手说明"],
+    initial_queries: [
+      "site:deepseek.com DeepSeek V4 发布",
+      "site:api-docs.deepseek.com DeepSeek V4",
+      "DeepSeek V4 官方公告"
+    ],
+    site_search_strategies: [
+      {
+        site_name: "DeepSeek",
+        domain: "deepseek.com",
+        search_mode: "site_query",
+        query_variants: ["DeepSeek V4 发布", "DeepSeek 官方公告"],
+        rationale: "官方主站是一手证据。"
+      }
+    ],
+    rationale: "official-first"
+  });
+
+  assert.deepEqual(merged.chosen_connector_ids, []);
+  assert.deepEqual(merged.preferred_connectors, []);
+  assert.equal(merged.planner_rationale, "official-first");
+  assert.equal(merged.site_search_strategies[0].domain, "deepseek.com");
+  assert.ok(merged.initial_queries[0].includes("DeepSeek"));
+});
+
+test("preparePlanPhase should choose runtime connectors after planner phase", async () => {
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalFetch = global.fetch;
+  const calls = [];
+  process.env.OPENAI_API_KEY = "test-key";
+
+  global.fetch = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    calls.push(JSON.stringify(payload.input));
+    return {
+      ok: true,
+      json: async () => ({
+        output: [
+          {
+            type: "message",
+            content: [
+              {
+                type: "output_text",
+                text: JSON.stringify({
+                  chosen_connector_ids: ["github", "bing_web"],
+                  connector_reasons: [
+                    { id: "github", reason: "repo evidence" },
+                    { id: "bing_web", reason: "generic site-query fallback" }
+                  ],
+                  rationale: "site-driven runtime selection"
+                })
+              }
+            ]
+          }
+        ]
+      })
+    };
+  };
+
+  try {
+    const session = {
+      question: "OpenAI update",
+      telemetry: { events: [] },
+      plan: {
+        ...researchInternal.buildLlmPlanningContext("OpenAI update"),
+        sub_questions: ["Q1"],
+        required_evidence: ["official text"],
+        initial_queries: ["OpenAI official update"],
+        chosen_connector_ids: [],
+        preferred_connectors: [],
+        site_search_strategies: [
+          {
+            site_name: "GitHub",
+            domain: "github.com",
+            search_mode: "connector_search",
+            query_variants: ["openai release notes"],
+            rationale: "repo evidence"
+          },
+          {
+            site_name: "Wikipedia",
+            domain: "wikipedia.org",
+            search_mode: "site_query",
+            query_variants: ["OpenAI background"],
+            rationale: "domain-filtered verification"
+          }
+        ]
+      }
+    };
+
+    await researchInternal.preparePlanPhase(session);
+    assert.deepEqual(session.plan.chosen_connector_ids, ["github", "bing_web"]);
+    assert.deepEqual(session.plan.preferred_connectors.map((item) => item.id), ["github", "bing_web"]);
+    assert.equal(session.plan.site_search_strategies[0].resolved_connector_id, "github");
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /Available runtime connectors:/i);
+    assert.match(calls[0], /github/i);
+    assert.match(calls[0], /bing_web/i);
+    assert.match(calls[0], /wikipedia/i);
+    assert.doesNotMatch(calls[0], /zhihu/i);
+  } finally {
+    if (originalApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = originalApiKey;
+    }
+    global.fetch = originalFetch;
+  }
+});
+
+test("chooseConnectorsForQuestion should treat hinted site connectors as optional", () => {
+  const chosen = researchInternal.chooseConnectorsForQuestion(
+    "OpenAI Sora official update",
+    [
+      { id: "bing_web", label: "Bing Web", reason: "broad discovery" },
+      { id: "ithome", label: "IT Home", reason: "tech reporting" }
+    ],
+    null,
+    {
+      items: [
+        {
+          name: "Douyin",
+          domain: "douyin.com",
+          connector_id: "douyin"
+        }
+      ],
+      domains: ["douyin.com"]
+    }
+  );
+
+  assert.deepEqual(chosen, ["bing_web", "ithome"]);
+  assert.ok(!chosen.includes("douyin"));
+});
+
+test("buildPlan should fail fast when OPENAI_API_KEY is absent in strict llm-only mode", async () => {
   const originalApiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
 
   try {
-    const plan = await researchInternal.buildPlan("美国总统特朗普 演讲视频");
-    assert.equal(plan.planner_mode, "fallback");
-    assert.ok(Array.isArray(plan.chosen_connector_ids));
-    assert.ok(plan.chosen_connector_ids.length >= 2);
+    await assert.rejects(
+      () => researchInternal.buildPlan("缂囧骸娴楅幀鑽ょ埠閻楄婀曢弲?濠曟棁顔夌憴鍡涱暥"),
+      /OPENAI_API_KEY is required for llm-only planning/
+    );
   } finally {
     if (originalApiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
@@ -264,7 +387,6 @@ test("buildPlan should merge llm-generated sub-questions and queries", async () 
                 sub_questions: ["What changed?", "Why does it matter?"],
                 required_evidence: ["Official update", "Independent confirmation"],
                 initial_queries: ["OpenAI Sora official update", "Sora independent review"],
-                chosen_connector_ids: ["bing_web", "ithome"],
                 site_search_strategies: [
                   {
                     site_name: "OpenAI",
@@ -275,11 +397,7 @@ test("buildPlan should merge llm-generated sub-questions and queries", async () 
                     rationale: "Official updates should be searched on the primary domain first."
                   }
                 ],
-                rationale: "Prioritize official and current reporting.",
-                connector_reasons: [
-                  { id: "bing_web", reason: "broad discovery" },
-                  { id: "ithome", reason: "current Chinese tech reporting" }
-                ]
+                rationale: "Prioritize official and current reporting."
               })
             }
           ]
@@ -289,86 +407,14 @@ test("buildPlan should merge llm-generated sub-questions and queries", async () 
   });
 
   try {
-    const plan = await researchInternal.buildPlan("Sora current update");
-    assert.equal(plan.planner_mode, "llm");
+    const plan = await researchInternal.buildPlan("OpenAI Sora update");
+
     assert.deepEqual(plan.sub_questions, ["What changed?", "Why does it matter?"]);
+    assert.deepEqual(plan.required_evidence, ["Official update", "Independent confirmation"]);
     assert.deepEqual(plan.initial_queries, ["OpenAI Sora official update", "Sora independent review"]);
-    assert.equal(plan.stop_policy.expected_sub_questions, 2);
     assert.equal(plan.site_search_strategies[0].domain, "openai.com");
-    assert.equal(plan.site_search_strategies[0].search_mode, "site_query");
-  } finally {
-    if (originalApiKey === undefined) {
-      delete process.env.OPENAI_API_KEY;
-    } else {
-      process.env.OPENAI_API_KEY = originalApiKey;
-    }
-    global.fetch = originalFetch;
-  }
-});
-
-test("selectCandidatesWithRouting should honor llm-selected agent and tool", async () => {
-  const originalApiKey = process.env.OPENAI_API_KEY;
-  const originalFetch = global.fetch;
-  process.env.OPENAI_API_KEY = "test-key";
-
-  global.fetch = async () => ({
-    ok: true,
-    json: async () => ({
-      output: [
-        {
-          type: "message",
-          content: [
-            {
-              type: "output_text",
-              text: JSON.stringify({
-                selected_candidates: [
-                  {
-                    id: "c2",
-                    agent: "video_parser",
-                    tool: "extract_video_intel",
-                    reason: "Video source is directly relevant"
-                  }
-                ],
-                rationale: "Prefer direct video evidence first."
-              })
-            }
-          ]
-        }
-      ]
-    })
-  });
-
-  try {
-    const plan = researchInternal.planner("Sora talk video");
-    const result = await researchInternal.selectCandidatesWithRouting([
-      {
-        id: "c1",
-        title: "Article",
-        connector: "bing_web",
-        content_type: "web",
-        source_type: "web",
-        platform: "Web",
-        score: 0.5,
-        snippet: "Article summary",
-        url: "https://example.com/article"
-      },
-      {
-        id: "c2",
-        title: "Video",
-        connector: "ted",
-        content_type: "video",
-        source_type: "video",
-        platform: "TED",
-        score: 0.7,
-        snippet: "Video summary",
-        url: "https://example.com/video"
-      }
-    ], "Sora talk video", plan);
-
-    assert.equal(result.routing_mode, "llm");
-    assert.equal(result.selected[0].id, "c2");
-    assert.equal(result.selected[0].preferred_agent, "video_parser");
-    assert.equal(result.selected[0].preferred_tool, "extract_video_intel");
+    assert.equal(plan.planner_rationale, "Prioritize official and current reporting.");
+    assert.deepEqual(plan.chosen_connector_ids, []);
   } finally {
     if (originalApiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
@@ -618,39 +664,40 @@ test("planner should include experience hints in connector and query planning", 
   assert.ok(!plan.chosen_connector_ids.includes("hacker_news"));
 });
 
-test("requestStopDecisionFromModel should return null when OPENAI_API_KEY is absent", async () => {
+test("requestStopDecisionFromModel should fail fast when OPENAI_API_KEY is absent in strict llm-only mode", async () => {
   const originalApiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
 
   try {
-    const decision = await researchInternal.requestStopDecisionFromModel(
-      {
-        task_goal: "test question",
-        sub_questions: ["one"],
-        stop_policy: { max_rounds: 2 }
-      },
-      [
+    await assert.rejects(
+      () => researchInternal.requestStopDecisionFromModel(
         {
-          source_id: "source-1",
-          title: "Demo source",
-          source_type: "web",
-          source_metadata: { connector: "bing_web", authority_score: 0.8 },
-          key_points: ["one"],
-          quotes: [],
-          claims: []
+          task_goal: "test question",
+          sub_questions: ["one"],
+          stop_policy: { max_rounds: 2 }
+        },
+        [
+          {
+            source_id: "source-1",
+            title: "Demo source",
+            source_type: "web",
+            source_metadata: { connector: "bing_web", authority_score: 0.8 },
+            key_points: ["one"],
+            quotes: [],
+            claims: []
+          }
+        ],
+        { confirmations: [], conflicts: [], coverage_gaps: [] },
+        {
+          is_sufficient: false,
+          resolved_questions: [],
+          missing_questions: ["one"],
+          risk_notes: [],
+          metrics: {}
         }
-      ],
-      { confirmations: [], conflicts: [], coverage_gaps: [] },
-      {
-        is_sufficient: false,
-        resolved_questions: [],
-        missing_questions: ["one"],
-        risk_notes: [],
-        metrics: {}
-      }
+      ),
+      /OPENAI_API_KEY is required for llm-only evaluation/
     );
-
-    assert.equal(decision, null);
   } finally {
     if (originalApiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
@@ -806,17 +853,24 @@ test("mergeEvaluationWithStopDecision should let llm stop the loop when evidence
       }
     },
     {
-      should_stop: true,
+      is_sufficient: true,
       can_answer_accurately: true,
       answerability: "sufficient",
       confidence: 0.87,
-      stop_reason: "evidence_sufficient",
-      missing_information: [],
+      resolved_questions: ["one"],
+      missing_questions: [],
       risk_notes: [],
       follow_up_queries: [],
       suggested_connector_ids: [],
-      reasoning: "The evidence is enough for an accurate answer.",
-      recommended_action: "synthesize_answer"
+      next_best_action: "synthesize_answer",
+      reason: "evidence_sufficient",
+      metrics: {
+        source_types_covered: 2,
+        evidence_units: 3,
+        overall_coverage: 0.91,
+        conflict_count: 0,
+        single_source_claims: 0
+      }
     },
     1,
     2
@@ -845,17 +899,24 @@ test("mergeEvaluationWithStopDecision should preserve llm follow-up guidance whe
       }
     },
     {
-      should_stop: false,
+      is_sufficient: false,
       can_answer_accurately: false,
       answerability: "partial",
       confidence: 0.44,
-      stop_reason: "need_official_corroboration",
-      missing_information: ["official confirmation", "more recent benchmark"],
+      resolved_questions: ["what changed"],
+      missing_questions: ["official confirmation", "more recent benchmark"],
       risk_notes: ["sources disagree on the benchmark number"],
       follow_up_queries: ["latency official benchmark", "latency latest official update"],
       suggested_connector_ids: ["bing_web", "arxiv"],
-      reasoning: "The current evidence is useful but still too thin for a final answer.",
-      recommended_action: "run_follow_up_search"
+      next_best_action: "run_follow_up_search",
+      reason: "need_official_corroboration",
+      metrics: {
+        source_types_covered: 1,
+        evidence_units: 2,
+        overall_coverage: 0.44,
+        conflict_count: 1,
+        single_source_claims: 1
+      }
     },
     1,
     2
@@ -1138,3 +1199,7 @@ test("crossCheckFacts should merge llm verifier review when the model is availab
     global.fetch = originalFetch;
   }
 });
+
+
+
+

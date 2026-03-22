@@ -157,3 +157,111 @@ test("fetchOpenAIJsonWithRetry should retry retriable non-JSON responses", async
     global.fetch = originalFetch;
   }
 });
+
+test("createControlAction should stamp typed orchestration decisions", () => {
+  const action = researchInternal.createControlAction(researchInternal.CONTROL_ACTION_TYPES.CONTINUE_SEARCH, {
+    connector_ids: ["bing_web"],
+    reason: "need more evidence"
+  });
+
+  assert.equal(action.type, "continue_search");
+  assert.deepEqual(action.connector_ids, ["bing_web"]);
+  assert.equal(action.reason, "need more evidence");
+  assert.ok(action.issued_at);
+});
+
+test("buildSearchPolicy should degrade unhealthy connectors and preserve reserves", () => {
+  const policy = researchInternal.buildSearchPolicy({
+    chosen_connector_ids: ["bing_web", "ithome", "ted"],
+    source_capabilities: [{ id: "segmentfault" }],
+    execution_budget: {
+      max_connectors: 3,
+      max_queries: 5,
+      max_site_hint_tasks: 2,
+      degrade_after_connector_failures: 2
+    }
+  }, ["bing_web", "ithome", "ted"], null, {
+    ithome: { failed_events: 3, healthy: false }
+  });
+
+  assert.equal(policy.search_mode, "degraded");
+  assert.ok(policy.degraded_connector_ids.includes("ithome"));
+  assert.ok(policy.connector_ids.includes("bing_web"));
+  assert.ok(!policy.connector_ids.includes("ithome"));
+  assert.equal(policy.query_limit, 5);
+});
+
+test("buildFollowUpQueries should respect execution budget and compacted context", () => {
+  const scratchpad = researchInternal.createScratchpad({
+    sub_questions: ["a"],
+    execution_budget: { max_follow_up_queries: 2 }
+  });
+  scratchpad.workspace.compacted_context = {
+    follow_up_queries: ["fallback 1", "fallback 2", "fallback 3"]
+  };
+
+  const queries = researchInternal.buildFollowUpQueries("demo", {
+    follow_up_queries: ["q1", "q2", "q3"]
+  }, scratchpad);
+
+  assert.deepEqual(queries, ["q1", "q2"]);
+});
+
+test("compactScratchpadForNextRound should persist high-signal digest", () => {
+  const scratchpad = researchInternal.createScratchpad({
+    sub_questions: ["What changed?"],
+    execution_budget: { max_follow_up_queries: 4 }
+  });
+  const digest = researchInternal.buildRoundDigest(1, {
+    queries: ["OpenAI Sora update"],
+    chosen_connector_ids: ["bing_web"],
+    selected_sources: [{ id: "src-1" }]
+  }, {
+    resolved_questions: ["What changed?"],
+    missing_questions: [],
+    risk_notes: ["low evidence diversity"]
+  }, {
+    conflicts: [],
+    coverage_gaps: [{ key: "gap-1" }]
+  }, [{
+    source_id: "src-1",
+    title: "Update",
+    source_type: "web",
+    key_points: ["The release expanded availability."]
+  }]);
+
+  researchInternal.compactScratchpadForNextRound(scratchpad, digest, {
+    resolved_questions: ["What changed?"],
+    missing_questions: [],
+    risk_notes: ["low evidence diversity"],
+    follow_up_queries: ["Need official confirmation"]
+  }, {
+    conflicts: [],
+    coverage_gaps: [{ key: "gap-1" }]
+  });
+
+  assert.equal(scratchpad.workspace.round_digests.length, 1);
+  assert.equal(scratchpad.workspace.compacted_context.latest_round_digest.round, 1);
+  assert.deepEqual(scratchpad.workspace.compacted_context.follow_up_queries, ["Need official confirmation"]);
+});
+
+test("deriveRoundControlAction should produce partial-stop and answer actions", () => {
+  const partial = researchInternal.deriveRoundControlAction({
+    chosen_connector_ids: ["bing_web"],
+    execution_budget: { max_connectors: 2 }
+  }, {
+    next_best_action: "stop_with_partial_answer",
+    reason: "round budget exhausted"
+  }, ["bing_web"], {});
+  const answer = researchInternal.deriveRoundControlAction({
+    chosen_connector_ids: ["bing_web"],
+    execution_budget: { max_connectors: 2 }
+  }, {
+    is_sufficient: true,
+    next_best_action: "synthesize_answer",
+    reason: "sufficient coverage"
+  }, ["bing_web"], {});
+
+  assert.equal(partial.type, "stop_partial");
+  assert.equal(answer.type, "answer_now");
+});

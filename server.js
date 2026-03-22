@@ -1,6 +1,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+require("./src/project-env").initializeProjectEnv();
 const researchEngine = require("./src/research-engine");
 
 const publicDir = path.join(__dirname, "public");
@@ -15,8 +16,20 @@ class HttpError extends Error {
 }
 
 function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(payload, null, 2));
+  let resolvedStatusCode = statusCode;
+  let body;
+  try {
+    body = JSON.stringify(payload, null, 2);
+  } catch (error) {
+    resolvedStatusCode = 500;
+    body = JSON.stringify({
+      error: "serialization_failed",
+      message: error?.message || "Response payload is not JSON serializable"
+    }, null, 2);
+  }
+
+  res.writeHead(resolvedStatusCode, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(body);
 }
 
 function sendSseEvent(res, eventName, payload) {
@@ -101,26 +114,24 @@ function normalizeMode(value) {
   if (value === undefined || value === null || value === "") {
     return "deep";
   }
-  if (value === "quick" || value === "deep") {
-    return value;
+  if (value === "deep") {
+    return "deep";
   }
-  throw new HttpError(400, "invalid_request", "mode must be either quick or deep");
+  throw new HttpError(400, "invalid_request", "mode must be deep");
 }
 
 function normalizeSearchProfile(value) {
   if (value === undefined || value === null || value === "") {
     return "quality";
   }
-  if (value === "speed" || value === "balanced" || value === "quality") {
-    return value;
+  if (value === "quality") {
+    return "quality";
   }
-  throw new HttpError(400, "invalid_request", "search_profile must be one of speed, balanced, quality");
+  throw new HttpError(400, "invalid_request", "search_profile must be quality");
 }
 
 function modeForSearchProfile(profile) {
-  if (profile === "speed") {
-    return "quick";
-  }
+  void profile;
   return "deep";
 }
 
@@ -133,7 +144,7 @@ function resolveSearchExecution(input) {
     const mode = normalizeMode(input.mode);
     const searchProfile = hasProfile
       ? normalizeSearchProfile(rawProfile)
-      : (mode === "quick" ? "speed" : "quality");
+      : "quality";
     return { mode, searchProfile, mode_source: "mode" };
   }
 
@@ -293,11 +304,50 @@ function normalizeSearchResult(result, query, mode, searchProfile, modeSource = 
       rounds: Array.isArray(result?.rounds) ? result.rounds.length : 0,
       evidence_units: evidence.length,
       evaluator_mode: result?.evaluation?.evaluator_mode || null,
+      planner_mode: result?.plan?.planner_mode || null,
+      planner_rationale: result?.plan?.planner_rationale || null,
       mode_source: modeSource,
       site_search_strategy_count: siteStrategyCount,
       executed_search_task_count: executedSearchTaskCount
     }
   };
+}
+
+function toSerializable(value) {
+  if (value === undefined) {
+    return null;
+  }
+
+  const seen = new WeakSet();
+  const serialized = JSON.stringify(value, (key, current) => {
+    if (typeof current === "bigint") {
+      const asNumber = Number(current);
+      return Number.isSafeInteger(asNumber) ? asNumber : String(current);
+    }
+    if (typeof current === "function") {
+      return undefined;
+    }
+    if (current instanceof Error) {
+      return {
+        name: current.name,
+        message: current.message,
+        stack: current.stack
+      };
+    }
+    if (current && typeof current === "object") {
+      if (seen.has(current)) {
+        return undefined;
+      }
+      seen.add(current);
+    }
+    return current;
+  });
+
+  if (serialized === undefined) {
+    return null;
+  }
+
+  return JSON.parse(serialized);
 }
 
 function normalizeResearchResponse(result) {
@@ -308,9 +358,10 @@ function normalizeResearchResponse(result) {
     };
   }
 
+  const serializable = toSerializable(result);
   return {
     response_schema_version: "research_response.v1",
-    ...result
+    ...(isPlainObject(serializable) ? serializable : { result: serializable })
   };
 }
 
@@ -369,14 +420,12 @@ function createServer(deps = {}) {
     if (req.method === "GET" && url.pathname === "/api/search/capabilities") {
       sendJson(res, 200, {
         schema_version: "search-capabilities.v1",
-        modes: ["quick", "deep"],
+        modes: ["deep"],
         default_mode: "deep",
         search_profiles: {
-          values: ["speed", "balanced", "quality"],
+          values: ["quality"],
           default: "quality",
           mode_mapping: {
-            speed: "quick",
-            balanced: "deep",
             quality: "deep"
           }
         },
@@ -476,7 +525,13 @@ function createServer(deps = {}) {
 
     if (req.method === "GET" && url.pathname === "/api/research/stream") {
       const question = String(url.searchParams.get("question") || "").trim();
-      const mode = url.searchParams.get("mode") === "quick" ? "quick" : "deep";
+      let mode = "deep";
+      try {
+        mode = normalizeMode(url.searchParams.get("mode"));
+      } catch (error) {
+        sendError(res, error, "invalid_request", "Invalid stream request");
+        return;
+      }
 
       res.writeHead(200, {
         "Content-Type": "text/event-stream; charset=utf-8",

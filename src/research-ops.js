@@ -42,7 +42,8 @@ function buildSiteStrategyTasks(plan, queries) {
   const tasks = [];
 
   for (const strategy of strategies) {
-    if (strategy.search_mode === "verify_only") {
+    const effectiveSearchMode = strategy.effective_search_mode || strategy.search_mode;
+    if (effectiveSearchMode === "verify_only") {
       continue;
     }
 
@@ -51,27 +52,33 @@ function buildSiteStrategyTasks(plan, queries) {
       : (defaultSeedQuery ? [defaultSeedQuery] : []);
     const preferredDomains = strategy.domain ? [strategy.domain] : [];
 
-    if (strategy.search_mode === "connector_search" || strategy.search_mode === "hybrid") {
-      const connectorIds = strategy.connector_id
-        ? [strategy.connector_id]
+    if (effectiveSearchMode === "connector_search" || effectiveSearchMode === "hybrid") {
+      const connectorIds = strategy.resolved_connector_id || strategy.connector_id
+        ? [strategy.resolved_connector_id || strategy.connector_id]
         : (plan.chosen_connector_ids || []);
       for (const query of queryVariants.slice(0, 3)) {
         tasks.push({
           query,
           connector_ids: connectorIds,
           preferred_domains: preferredDomains,
-          site_strategy: strategy
+          site_strategy: strategy,
+          effective_search_mode: effectiveSearchMode,
+          read_connector_id: strategy.resolved_connector_id || null
         });
       }
     }
 
-    if ((strategy.search_mode === "site_query" || strategy.search_mode === "hybrid") && strategy.domain) {
+    if ((effectiveSearchMode === "site_query" || effectiveSearchMode === "hybrid" || effectiveSearchMode === "site_query_with_generated_read") && strategy.domain) {
       for (const query of queryVariants.slice(0, 3)) {
         tasks.push({
           query: applySiteFilter(query, strategy.domain),
           connector_ids: ["bing_web"],
           preferred_domains: preferredDomains,
-          site_strategy: strategy
+          site_strategy: strategy,
+          effective_search_mode: effectiveSearchMode,
+          read_connector_id: effectiveSearchMode === "site_query_with_generated_read"
+            ? (strategy.resolved_connector_id || null)
+            : null
         });
       }
     }
@@ -85,6 +92,39 @@ function buildSiteStrategyTasks(plan, queries) {
     }
   }
   return Array.from(deduped.values()).slice(0, 8);
+}
+
+function matchesStrategyDomain(url, domain) {
+  const normalizedDomain = String(domain || "").trim().toLowerCase().replace(/^www\./, "");
+  if (!normalizedDomain) {
+    return false;
+  }
+  try {
+    const hostname = new URL(String(url || "")).hostname.toLowerCase().replace(/^www\./, "");
+    return hostname === normalizedDomain || hostname.endsWith(`.${normalizedDomain}`);
+  } catch (error) {
+    return false;
+  }
+}
+
+function applyGeneratedReadConnector(candidates, task) {
+  if (!task?.read_connector_id || !task?.site_strategy?.domain) {
+    return candidates;
+  }
+  return candidates.map((candidate) => {
+    if (!matchesStrategyDomain(candidate.url, task.site_strategy.domain)) {
+      return candidate;
+    }
+    return {
+      ...candidate,
+      connector: task.read_connector_id,
+      metadata: {
+        ...(candidate.metadata || {}),
+        generated_read_connector: task.read_connector_id,
+        discovered_via_connector: candidate.connector
+      }
+    };
+  });
 }
 
 function dedupeBy(items, getKey) {
@@ -320,6 +360,37 @@ function collectorCapabilityForTask(agent, candidate) {
     return "read_document";
   }
   return "read_web_page";
+}
+
+function collectorCapabilityForTool(candidate, preferredToolId) {
+  if (preferredToolId === "extract_video_intel") {
+    return "parse_video";
+  }
+  if (preferredToolId === "read_document_intel" || preferredToolId === "analyze_document_multimodal") {
+    return "parse_chart_document";
+  }
+  if (candidate?.content_type === "document" || candidate?.source_type === "document") {
+    return "read_document";
+  }
+  return "read_web_page";
+}
+
+function taskTypeForTool(preferredToolId) {
+  if (preferredToolId === "extract_video_intel") {
+    return "parse_video_source";
+  }
+  if (preferredToolId === "read_document_intel" || preferredToolId === "analyze_document_multimodal") {
+    return "parse_chart_source";
+  }
+  return "collect_long_text";
+}
+
+function assignAgentsRoundRobin(selected = []) {
+  const workerAgents = ["long_text_collector", "video_parser", "chart_parser", "fact_verifier"];
+  return (selected || []).map((candidate, index) => ({
+    ...candidate,
+    assigned_agent: workerAgents[index % workerAgents.length]
+  }));
 }
 
 function buildFallbackToolIds(agent, candidate, preferredToolId, capability = null) {
@@ -639,12 +710,16 @@ function scoreCandidateFit(candidate, question, plan) {
 
 function selectCandidates(candidates, question, plan) {
   const selected = [];
+  const configuredLimit = Number(plan?.execution_budget?.max_selected_candidates);
+  const selectionLimit = Number.isFinite(configuredLimit) && configuredLimit > 0
+    ? Math.max(1, Math.min(candidates.length, configuredLimit))
+    : Math.max(1, candidates.length);
   const remaining = [...candidates].map((item) => ({
     ...item,
     selection_score: scoreCandidateFit(item, question, plan)
   }));
 
-  while (selected.length < 4 && remaining.length) {
+  while (selected.length < selectionLimit && remaining.length) {
     const selectedConnectors = new Set(selected.map((item) => item.connector));
     const selectedContentTypes = new Set(selected.map((item) => item.content_type || item.source_type));
     const next = remaining
@@ -741,9 +816,15 @@ function evaluateResearch(plan, scratchpad, evidenceUnits, verification, roundsC
 
 async function runWebResearcher(plan, queries, telemetry, runtime = null) {
   const startedAt = Date.now();
-  const preferredDomains = Array.from(new Set((plan.search_site_hints?.domains || []).filter(Boolean)));
-  const siteStrategyTasks = buildSiteStrategyTasks(plan, queries);
-  const queryReports = await Promise.all(queries.map(async (query) => {
+  const hintedDomains = Array.from(new Set((plan.search_site_hints?.domains || []).filter(Boolean)));
+  const preferredDomains = [];
+  const maxQueries = Math.max(1, Number(plan.execution_budget?.max_queries || queries.length));
+  const activeQueries = queries.slice(0, maxQueries);
+  const maxSiteHintTasks = Math.max(0, Number(plan.execution_budget?.max_site_hint_tasks ?? 4));
+  const siteStrategyTasks = maxSiteHintTasks > 0
+    ? buildSiteStrategyTasks(plan, activeQueries).slice(0, maxSiteHintTasks)
+    : [];
+  const queryReports = await Promise.all(activeQueries.map(async (query) => {
     const runtimeTask = runtime
       ? dispatchAgentTask(runtime, {
           from: "llm_orchestrator",
@@ -775,25 +856,26 @@ async function runWebResearcher(plan, queries, telemetry, runtime = null) {
     }
   }));
 
-  const fallbackSiteTasks = siteStrategyTasks.length
+  const fallbackSiteTasks = siteStrategyTasks.length || maxSiteHintTasks === 0
     ? []
-    : buildBingSiteQueries(queries, plan.search_site_hints, 4).map((query) => ({
+    : buildBingSiteQueries(activeQueries, plan.search_site_hints, Math.min(4, maxSiteHintTasks)).map((query) => ({
         query,
         connector_ids: ["bing_web"],
-        preferred_domains: preferredDomains,
+        preferred_domains: hintedDomains,
         site_hint_query: true
       }));
   const siteHintReports = await Promise.all([...siteStrategyTasks, ...fallbackSiteTasks].map(async (task) => {
     try {
-      const candidates = await invokeSourceTool({
+      const discoveredCandidates = await invokeSourceTool({
         action: "discover",
         query: task.query,
         connector_ids: task.connector_ids,
-        preferred_domains: task.preferred_domains?.length ? task.preferred_domains : preferredDomains
+        preferred_domains: task.preferred_domains?.length ? task.preferred_domains : hintedDomains
       });
-      return { query: task.query, candidates, error: null, site_hint_query: true, site_strategy: task.site_strategy || null };
+      const candidates = applyGeneratedReadConnector(discoveredCandidates, task);
+      return { query: task.query, candidates, error: null, site_hint_query: true, site_strategy: task.site_strategy || null, read_connector_id: task.read_connector_id || null };
     } catch (error) {
-      return { query: task.query, candidates: [], error, site_hint_query: true, site_strategy: task.site_strategy || null };
+      return { query: task.query, candidates: [], error, site_hint_query: true, site_strategy: task.site_strategy || null, read_connector_id: task.read_connector_id || null };
     }
   }));
 
@@ -809,13 +891,13 @@ async function runWebResearcher(plan, queries, telemetry, runtime = null) {
   telemetry.events.push({
     stage: "web_researcher",
     duration_ms: Date.now() - startedAt,
-    query_count: queries.length,
+    query_count: activeQueries.length,
     site_hint_query_count: [...siteStrategyTasks, ...fallbackSiteTasks].length,
     result_count: [...queryReports, ...siteHintReports].reduce((total, item) => total + item.candidates.length, 0)
   });
 
   const executedSearchTasks = [
-    ...queries.map((query) => ({
+    ...activeQueries.map((query) => ({
       query,
       connector_ids: plan.chosen_connector_ids,
       preferred_domains: preferredDomains,
@@ -827,12 +909,14 @@ async function runWebResearcher(plan, queries, telemetry, runtime = null) {
     ...[...siteStrategyTasks, ...fallbackSiteTasks].map((task) => ({
       query: task.query,
       connector_ids: task.connector_ids,
-      preferred_domains: task.preferred_domains?.length ? task.preferred_domains : preferredDomains,
+      preferred_domains: task.preferred_domains?.length ? task.preferred_domains : hintedDomains,
       search_origin: task.site_strategy ? "llm_site_strategy" : "fallback_site_hint",
-      search_mode: task.site_strategy?.search_mode || "site_query",
+      search_mode: task.effective_search_mode || task.site_strategy?.effective_search_mode || task.site_strategy?.search_mode || "site_query",
       site_name: task.site_strategy?.site_name || null,
       domain: task.site_strategy?.domain || task.preferred_domains?.[0] || null,
-      rationale: task.site_strategy?.rationale || null
+      rationale: task.site_strategy?.rationale || null,
+      resolved_connector_id: task.site_strategy?.resolved_connector_id || null,
+      provisioning_status: task.site_strategy?.provisioning_status || null
     }))
   ];
 
@@ -844,21 +928,13 @@ async function runWebResearcher(plan, queries, telemetry, runtime = null) {
 }
 
 async function runSpecialistReads(selected, telemetry, runtime = null) {
-  const resolvedAgentForCandidate = (candidate) => candidate.preferred_agent || routeCandidate(candidate);
-  const resolvedToolForCandidate = (candidate) => candidate.preferred_tool || collectorToolForCandidate(candidate);
-  const longTextCandidates = selected.filter((item) => resolvedAgentForCandidate(item) === "long_text_collector");
-  const videoCandidates = selected.filter((item) => resolvedAgentForCandidate(item) === "video_parser");
-  const chartCandidates = selected.filter((item) => resolvedAgentForCandidate(item) === "chart_parser");
-  const forumCandidates = selected.filter((item) => resolvedAgentForCandidate(item) === "fact_verifier");
+  const assignedCandidates = assignAgentsRoundRobin(selected);
 
-  async function readGroup(agent, candidates) {
-    const startedAt = Date.now();
-    const settled = await Promise.all(candidates.map(async (candidate) => {
-      const taskType = agent === "video_parser"
-        ? "parse_video_source"
-        : agent === "chart_parser"
-          ? "parse_chart_source"
-          : "collect_long_text";
+  const startedAt = Date.now();
+  const settled = await Promise.all(assignedCandidates.map(async (candidate) => {
+      const agent = candidate.assigned_agent;
+      const preferredToolId = candidate.preferred_tool || collectorToolForCandidate(candidate);
+      const taskType = taskTypeForTool(preferredToolId);
       const runtimeTask = runtime
         ? dispatchAgentTask(runtime, {
             from: "llm_orchestrator",
@@ -884,8 +960,7 @@ async function runSpecialistReads(selected, telemetry, runtime = null) {
           };
         }
 
-        const preferredToolId = resolvedToolForCandidate(candidate);
-        const capability = collectorCapabilityForTask(agent, candidate);
+        const capability = collectorCapabilityForTool(candidate, preferredToolId);
         const toolResolution = telemetry?.agent_system?.resolveToolForTask
           ? telemetry.agent_system.resolveToolForTask({
               agent,
@@ -942,8 +1017,8 @@ async function runSpecialistReads(selected, telemetry, runtime = null) {
                 source_id: candidate.id,
                 segment_source_id: recovered.read.source_id,
                 agent,
-                tool: recovered.recovered_by || recovered.read.tool || resolvedToolForCandidate(candidate),
-                capability: collectorCapabilityForTask(agent, candidate),
+                tool: recovered.recovered_by || recovered.read.tool || preferredToolId,
+                capability: collectorCapabilityForTool(candidate, preferredToolId),
                 pages: null,
                 objective: "Recovered after tool creation"
               }],
@@ -972,53 +1047,58 @@ async function runSpecialistReads(selected, telemetry, runtime = null) {
       }
     }));
 
+  const perAgentStats = assignedCandidates.reduce((accumulator, candidate) => {
+    const agent = candidate.assigned_agent || "long_text_collector";
+    if (!accumulator[agent]) {
+      accumulator[agent] = { task_count: 0, success_count: 0 };
+    }
+    accumulator[agent].task_count += 1;
+    return accumulator;
+  }, {});
+
+  for (const item of settled.filter((entry) => entry.reads?.length)) {
+    const agent = item.candidate.assigned_agent || "long_text_collector";
+    if (!perAgentStats[agent]) {
+      perAgentStats[agent] = { task_count: 0, success_count: 0 };
+    }
+    perAgentStats[agent].success_count += 1;
+  }
+
+  for (const [agent, stats] of Object.entries(perAgentStats)) {
     telemetry.events.push({
       stage: agent,
       duration_ms: Date.now() - startedAt,
-      task_count: candidates.length,
-      success_count: settled.filter((item) => item.reads?.length).length
+      task_count: stats.task_count,
+      success_count: stats.success_count
     });
-
-    for (const failure of settled.filter((item) => item.error)) {
-      telemetry.failures.push({
-        stage: agent,
-        query: failure.candidate.url,
-        connector: failure.candidate.connector,
-        reason: failure.error.message
-      });
-    }
-
-    return {
-      results: settled
-        .filter((item) => item.reads?.length)
-        .flatMap((item) => item.reads.map((read, index) => ({
-          candidate: item.candidate,
-          read,
-          evidence_unit: item.evidence_units?.[index] || createEvidenceUnit(read, item.candidate),
-          layout: item.layout || null
-        }))),
-      routed_tasks: settled.flatMap((item) => item.routed_tasks || []),
-      failures: settled
-        .filter((item) => item.error)
-        .map((item) => ({
-          agent,
-          candidate: item.candidate,
-          error: item.error
-        }))
-    };
   }
 
-  const [longTextReads, videoReads, chartReads, forumReads] = await Promise.all([
-    readGroup("long_text_collector", longTextCandidates),
-    readGroup("video_parser", videoCandidates),
-    readGroup("chart_parser", chartCandidates),
-    readGroup("fact_verifier", forumCandidates)
-  ]);
+  for (const failure of settled.filter((item) => item.error)) {
+    telemetry.failures.push({
+      stage: failure.candidate.assigned_agent || "long_text_collector",
+      query: failure.candidate.url,
+      connector: failure.candidate.connector,
+      reason: failure.error.message
+    });
+  }
 
   return {
-    results: [...longTextReads.results, ...videoReads.results, ...chartReads.results, ...forumReads.results],
-    routed_tasks: [...longTextReads.routed_tasks, ...videoReads.routed_tasks, ...chartReads.routed_tasks, ...forumReads.routed_tasks],
-    failures: [...longTextReads.failures, ...videoReads.failures, ...chartReads.failures, ...forumReads.failures]
+    results: settled
+      .filter((item) => item.reads?.length)
+      .flatMap((item) => item.reads.map((read, index) => ({
+        candidate: item.candidate,
+        read,
+        evidence_unit: item.evidence_units?.[index] || createEvidenceUnit(read, item.candidate),
+        layout: item.layout || null
+      }))),
+    routed_tasks: settled.flatMap((item) => item.routed_tasks || []),
+    failures: settled
+      .filter((item) => item.error)
+      .map((item) => ({
+        agent: item.candidate.assigned_agent || "long_text_collector",
+        candidate: item.candidate,
+        error: item.error
+      }))
   };
 }
 
@@ -1091,6 +1171,8 @@ module.exports = {
   runFactVerifierReview,
   __internal: {
     buildSiteStrategyTasks,
-    applySiteFilter
+    applySiteFilter,
+    applyGeneratedReadConnector,
+    matchesStrategyDomain
   }
 };

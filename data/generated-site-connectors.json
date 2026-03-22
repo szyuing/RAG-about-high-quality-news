@@ -1,0 +1,225 @@
+{
+  "schema_version": "generated-site-connectors.v1",
+  "connectors": [
+    {
+      "id": "site_baidu_com",
+      "label": "baidu.com (Generated)",
+      "domain": "baidu.com",
+      "domains": [
+        "baidu.com"
+      ],
+      "description": "Generated connector for baidu.com.",
+      "capabilities": [
+        "content extraction",
+        "site-specific"
+      ],
+      "generated": true,
+      "supports_search": false,
+      "supports_read": true,
+      "tool_id": "generated_read_site_baidu_com",
+      "tool_ids": {
+        "read": "generated_read_site_baidu_com",
+        "search": null
+      },
+      "status": "active",
+      "search_config": null,
+      "last_verification": {
+        "read": {
+          "success": true,
+          "sample_length": 4044,
+          "verified_at": "2026-03-19T12:42:46.769Z"
+        },
+        "search": null,
+        "success": true
+      },
+      "created_at": "2026-03-19T12:42:42.159Z",
+      "updated_at": "2026-03-19T12:42:46.771Z",
+      "last_verified_at": "2026-03-19T12:42:46.769Z"
+    },
+    {
+      "id": "site_v_qq_com",
+      "label": "v.qq.com (Generated)",
+      "domain": "v.qq.com",
+      "domains": [
+        "v.qq.com"
+      ],
+      "description": "Generated connector for v.qq.com.",
+      "capabilities": [
+        "content extraction",
+        "site-specific"
+      ],
+      "generated": true,
+      "supports_search": false,
+      "supports_read": true,
+      "tool_id": "generated_read_site_v_qq_com",
+      "tool_ids": {
+        "read": "generated_read_site_v_qq_com",
+        "search": null
+      },
+      "status": "active",
+      "search_config": null,
+      "last_verification": {
+        "read": {
+          "success": true,
+          "sample_length": 980,
+          "verified_at": "2026-03-19T12:56:21.384Z"
+        },
+        "search": null,
+        "success": true
+      },
+      "created_at": "2026-03-19T12:56:06.080Z",
+      "updated_at": "2026-03-19T12:56:21.385Z",
+      "last_verified_at": "2026-03-19T12:56:21.384Z"
+    },
+    {
+      "id": "site_deepseek_com",
+      "label": "deepseek.com (Generated)",
+      "domain": "deepseek.com",
+      "domains": [
+        "deepseek.com"
+      ],
+      "description": "Generated connector for deepseek.com.",
+      "capabilities": [
+        "search",
+        "content extraction",
+        "site-specific"
+      ],
+      "generated": true,
+      "supports_search": true,
+      "supports_read": true,
+      "tool_id": "generated_read_site_deepseek_com",
+      "tool_ids": {
+        "read": "generated_read_site_deepseek_com",
+        "search": "generated_search_site_deepseek_com"
+      },
+      "status": "active",
+      "search_config": {
+        "type": "url_template",
+        "detected_from": "common_path",
+        "query_parameter": "q",
+        "url_template": "https://deepseek.com/search?q={query}"
+      },
+      "last_verification": {
+        "read": {
+          "success": true,
+          "sample_length": 2155,
+          "verified_at": "2026-03-20T06:18:46.087Z"
+        },
+        "search": {
+          "success": true,
+          "result_count": 8,
+          "verified_at": "2026-03-20T06:18:46.318Z"
+        },
+        "success": true
+      },
+      "created_at": "2026-03-20T06:18:40.363Z",
+      "updated_at": "2026-03-20T06:18:46.319Z",
+      "last_verified_at": "2026-03-20T06:18:46.318Z"
+    },
+    {
+      "id": "site_openai_com",
+      "label": "openai.com (Generated)",
+      "domain": "openai.com",
+      "domains": [
+        "openai.com"
+      ],
+      "description": "Generated connector for openai.com.",
+      "capabilities": [
+        "content extraction",
+        "site-specific"
+      ],
+      "generated": true,
+      "supports_search": false,
+      "supports_read": true,
+      "tool_id": "generated_read_site_openai_com",
+      "tool_ids": {
+        "read": "generated_read_site_openai_com",
+        "search": null
+      },
+      "status": "active",
+      "search_config": null,
+      "last_verification": {
+        "read": {
+          "success": true,
+          "sample_length": 3732,
+          "verified_at": "2026-03-22T11:13:09.671Z"
+        },
+        "search": null,
+        "success": true
+      },
+      "created_at": "2026-03-22T11:13:07.873Z",
+      "updated_at": "2026-03-22T11:13:09.673Z",
+      "last_verified_at": "2026-03-22T11:13:09.671Z"
+    },
+    {
+      "id": "site_imdb_com",
+      "label": "imdb.com (Generated)",
+      "domain": "imdb.com",
+      "domains": [
+        "imdb.com"
+      ],
+      "description": "Generated connector for imdb.com.",
+      "capabilities": [
+        "content extraction",
+        "site-specific"
+      ],
+      "generated": true,
+      "supports_search": false,
+      "supports_read": true,
+      "tool_id": "generated_read_site_imdb_com",
+      "tool_ids": {
+        "read": "generated_read_site_imdb_com",
+        "search": null
+      },
+      "status": "active",
+      "search_config": null,
+      "last_verification": {
+        "read": {
+          "success": true,
+          "sample_length": 231,
+          "verified_at": "2026-03-22T12:11:00.232Z"
+        },
+        "search": null,
+        "success": true
+      },
+      "created_at": "2026-03-22T12:10:55.737Z",
+      "updated_at": "2026-03-22T12:11:00.235Z",
+      "last_verified_at": "2026-03-22T12:11:00.232Z"
+    },
+    {
+      "id": "site_wikiquote_org",
+      "label": "wikiquote.org (Generated)",
+      "domain": "wikiquote.org",
+      "domains": [
+        "wikiquote.org"
+      ],
+      "description": "Generated connector for wikiquote.org.",
+      "capabilities": [
+        "content extraction",
+        "site-specific"
+      ],
+      "generated": true,
+      "supports_search": false,
+      "supports_read": true,
+      "tool_id": "generated_read_site_wikiquote_org",
+      "tool_ids": {
+        "read": "generated_read_site_wikiquote_org",
+        "search": null
+      },
+      "status": "active",
+      "search_config": null,
+      "last_verification": {
+        "read": {
+          "success": true,
+          "sample_length": 2402,
+          "verified_at": "2026-03-22T12:17:54.833Z"
+        },
+        "search": null,
+        "success": true
+      },
+      "created_at": "2026-03-22T12:17:49.829Z",
+      "updated_at": "2026-03-22T12:17:54.836Z",
+      "last_verified_at": "2026-03-22T12:17:54.833Z"
+    }
+  ]
+}

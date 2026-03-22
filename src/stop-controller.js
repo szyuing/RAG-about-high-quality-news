@@ -1,13 +1,15 @@
-const { evaluateResearch } = require("./agent-orchestrator");
-const { extractTextFromResponsePayload } = require("./openai-response");
+﻿require('./project-env').initializeProjectEnv();
+const { extractTextFromResponsePayload, normalizeResponsesRequestBody, readResponsesApiPayload } = require('./openai-response');
+const { evaluateResearch } = require('./research-ops');
 
-const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
-const DEFAULT_EVALUATOR_MODEL = process.env.OPENAI_EVALUATOR_MODEL || "gpt-4o-mini";
+const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || 'https://api.openai.com/v1/responses';
+const DEFAULT_EVALUATOR_MODEL = process.env.OPENAI_EVALUATOR_MODEL || 'gpt-4o-mini';
+const OPENAI_REQUEST_TIMEOUT_MS = Math.max(20000, Number(process.env.OPENSEARCH_OPENAI_TIMEOUT_MS || 90000));
 const OPENAI_MAX_ATTEMPTS = Math.max(1, Number(process.env.OPENSEARCH_OPENAI_MAX_ATTEMPTS || 2));
 const OPENAI_RETRY_BASE_MS = Math.max(100, Number(process.env.OPENSEARCH_OPENAI_RETRY_BASE_MS || 400));
 
 function clamp01(value) {
-  return Math.max(0, Math.min(1, value));
+  return Math.max(0, Math.min(1, Number.isFinite(Number(value)) ? Number(value) : 0));
 }
 
 function unique(values) {
@@ -19,30 +21,30 @@ function wait(ms) {
 }
 
 function isRetriableOpenAIError(error, statusCode = null) {
-  if (typeof statusCode === "number") {
+  if (typeof statusCode === 'number') {
     return statusCode === 429 || statusCode >= 500;
   }
-  const message = String(error?.message || "");
+  const message = String(error?.message || '');
   return /timed out|timeout|fetch failed|network|ECONNRESET|ENOTFOUND|EAI_AGAIN|AbortError/i.test(message);
 }
 
-async function fetchOpenAIJsonWithRetry(apiKey, body, { timeoutMs = 25000, operation = "openai_stop_evaluator", maxAttempts = OPENAI_MAX_ATTEMPTS } = {}) {
+async function fetchOpenAIJsonWithRetry(apiKey, body, { timeoutMs = OPENAI_REQUEST_TIMEOUT_MS, operation = 'openai_stop_evaluator', maxAttempts = OPENAI_MAX_ATTEMPTS } = {}) {
   let lastError = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const response = await fetch(OPENAI_RESPONSES_URL, {
-        method: "POST",
+        method: 'POST',
         headers: {
-          "content-type": "application/json",
+          'content-type': 'application/json',
           authorization: `Bearer ${apiKey}`
         },
         signal: AbortSignal.timeout(timeoutMs),
-        body: JSON.stringify(body)
+        body: JSON.stringify(normalizeResponsesRequestBody(body, { forceStream: true }))
       });
 
-      const payload = await response.json();
+      const { rawText, payload } = await readResponsesApiPayload(response);
       if (!response.ok) {
-        const error = new Error(payload?.error?.message || `${operation} failed with HTTP ${response.status}`);
+        const error = new Error(payload?.error?.message || rawText.trim() || `${operation} failed with HTTP ${response.status}`);
         if (attempt < maxAttempts && isRetriableOpenAIError(error, response.status)) {
           console.warn(`[${operation}] attempt ${attempt}/${maxAttempts} failed, retrying: ${error.message}`);
           await wait(OPENAI_RETRY_BASE_MS * attempt);
@@ -91,10 +93,10 @@ function buildEvaluationScorecard(plan, evaluation, verification, roundsComplete
   ).toFixed(2));
 
   const status = evaluation?.is_sufficient
-    ? "ready"
+    ? 'ready'
     : (metrics.conflict_count || 0) > conflictBudget
-      ? "blocked_by_conflicts"
-      : "needs_more_evidence";
+      ? 'blocked_by_conflicts'
+      : 'needs_more_evidence';
 
   return {
     readiness,
@@ -136,33 +138,18 @@ function buildEvaluationScorecard(plan, evaluation, verification, roundsComplete
   };
 }
 
-function buildStopDecisionContext(plan, evidenceItems, verification, heuristicEvaluation, roundsCompleted = 1) {
+function buildStopDecisionContext(plan, evidenceItems, verification, roundsCompleted = 1, scratchpad = null) {
   return {
     question: plan.task_goal,
     sub_questions: plan.sub_questions,
+    rounds_completed: roundsCompleted,
+    stop_policy: plan.stop_policy,
     available_connectors: (plan.source_capabilities || []).map((item) => ({
       id: item.id,
       label: item.label,
       capabilities: item.capabilities || []
     })),
-    stop_policy: plan.stop_policy,
-    heuristic_evaluation: {
-      is_sufficient: heuristicEvaluation.is_sufficient,
-      resolved_questions: heuristicEvaluation.resolved_questions,
-      missing_questions: heuristicEvaluation.missing_questions,
-      risk_notes: heuristicEvaluation.risk_notes,
-      metrics: heuristicEvaluation.metrics,
-      follow_up_queries: heuristicEvaluation.follow_up_queries || [],
-      suggested_connector_ids: heuristicEvaluation.suggested_connector_ids || []
-    },
-    evaluation_scorecard: buildEvaluationScorecard(
-      plan,
-      heuristicEvaluation,
-      verification,
-      roundsCompleted,
-      null
-    ),
-    evidence_summary: evidenceItems.slice(0, 6).map((item) => ({
+    evidence_summary: evidenceItems.slice(0, 8).map((item) => ({
       source_id: item.source_id,
       title: item.title,
       source_type: item.source_type,
@@ -182,182 +169,179 @@ function buildStopDecisionContext(plan, evidenceItems, verification, heuristicEv
       }))
     })),
     verification_summary: {
-      confirmations: (verification.confirmations || []).slice(0, 4).map((entry) => ({
+      confirmations: (verification?.confirmations || []).slice(0, 4).map((entry) => ({
         key: entry.key,
         preferred_claim: entry.preferred_fact?.claim,
         reason: entry.reason
       })),
-      conflicts: (verification.conflicts || []).slice(0, 4).map((entry) => ({
+      conflicts: (verification?.conflicts || []).slice(0, 4).map((entry) => ({
         key: entry.key,
         preferred_claim: entry.preferred_fact?.claim,
         competing_sources: entry.comparison?.competing_sources || [],
         reason: entry.reason
       })),
-      coverage_gaps: (verification.coverage_gaps || []).slice(0, 4).map((entry) => ({
+      coverage_gaps: (verification?.coverage_gaps || []).slice(0, 4).map((entry) => ({
         key: entry.key,
         preferred_claim: entry.preferred_fact?.claim
       }))
+    },
+    scratchpad_snapshot: {
+      queries_tried: (scratchpad?.queries_tried || []).slice(0, 8),
+      sources_read: (scratchpad?.sources_read || []).length,
+      failure_paths: (scratchpad?.failure_paths || []).slice(0, 6)
     }
   };
 }
 
-async function requestStopDecisionFromModel(plan, evidenceItems, verification, heuristicEvaluation, roundsCompleted = 1) {
+async function requestStopDecisionFromModel(plan, evidenceItems, verification, roundsCompleted = 1, scratchpad = null) {
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey || !evidenceItems.length) {
-    return null;
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY is required for llm-only evaluation');
   }
 
+  const connectorIds = (plan?.source_capabilities || []).map((item) => item.id);
   const schema = {
-    type: "object",
+    type: 'object',
     additionalProperties: false,
     properties: {
-      should_stop: { type: "boolean" },
-      can_answer_accurately: { type: "boolean" },
+      is_sufficient: { type: 'boolean' },
+      can_answer_accurately: { type: 'boolean' },
       answerability: {
-        type: "string",
-        enum: ["sufficient", "partial", "insufficient"]
+        type: 'string',
+        enum: ['sufficient', 'partial', 'insufficient']
       },
       confidence: {
-        type: "number",
+        type: 'number',
         minimum: 0,
         maximum: 1
       },
-      stop_reason: { type: "string" },
-      missing_information: {
-        type: "array",
-        maxItems: 5,
-        items: { type: "string" }
+      resolved_questions: {
+        type: 'array',
+        maxItems: 8,
+        items: { type: 'string' }
+      },
+      missing_questions: {
+        type: 'array',
+        maxItems: 8,
+        items: { type: 'string' }
       },
       risk_notes: {
-        type: "array",
-        maxItems: 5,
-        items: { type: "string" }
+        type: 'array',
+        maxItems: 8,
+        items: { type: 'string' }
       },
       follow_up_queries: {
-        type: "array",
-        maxItems: 5,
-        items: { type: "string" }
+        type: 'array',
+        maxItems: 6,
+        items: { type: 'string' }
       },
       suggested_connector_ids: {
-        type: "array",
+        type: 'array',
         maxItems: 4,
         items: {
-          type: "string",
-          enum: (plan.source_capabilities || []).map((item) => item.id)
+          type: 'string',
+          enum: connectorIds
         }
       },
-      reasoning: { type: "string" },
-      recommended_action: {
-        type: "string",
-        enum: ["synthesize_answer", "run_follow_up_search", "stop_with_partial_answer"]
+      next_best_action: {
+        type: 'string',
+        enum: ['synthesize_answer', 'run_follow_up_search', 'stop_with_partial_answer']
+      },
+      reason: { type: 'string' },
+      metrics: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          source_types_covered: { type: 'number', minimum: 0 },
+          evidence_units: { type: 'number', minimum: 0 },
+          overall_coverage: { type: 'number', minimum: 0, maximum: 1 },
+          conflict_count: { type: 'number', minimum: 0 },
+          single_source_claims: { type: 'number', minimum: 0 }
+        },
+        required: ['source_types_covered', 'evidence_units', 'overall_coverage', 'conflict_count', 'single_source_claims']
       }
     },
     required: [
-      "should_stop",
-      "can_answer_accurately",
-      "answerability",
-      "confidence",
-      "stop_reason",
-      "missing_information",
-      "risk_notes",
-      "follow_up_queries",
-      "suggested_connector_ids",
-      "reasoning",
-      "recommended_action"
+      'is_sufficient',
+      'can_answer_accurately',
+      'answerability',
+      'confidence',
+      'resolved_questions',
+      'missing_questions',
+      'risk_notes',
+      'follow_up_queries',
+      'suggested_connector_ids',
+      'next_best_action',
+      'reason',
+      'metrics'
     ]
   };
 
   const prompt = [
-    "You are the final stop-policy evaluator for a research agent.",
-    "Decide whether the current evidence is enough to answer the user's question accurately right now.",
-    "Only set should_stop=true when the available evidence is already sufficient for an accurate answer.",
-    "If material is still missing, conflicting, or too thin, recommend continued search unless the system should stop with a partial answer.",
-    "",
-    JSON.stringify(buildStopDecisionContext(plan, evidenceItems, verification, heuristicEvaluation, roundsCompleted), null, 2)
-  ].join("\n");
+    'You are the stop-policy evaluator for a research agent in strict LLM-only mode.',
+    'Decide the stop state directly from evidence and verification; do not rely on heuristics.',
+    'Use only the provided context.',
+    '',
+    JSON.stringify(buildStopDecisionContext(plan, evidenceItems, verification, roundsCompleted, scratchpad), null, 2)
+  ].join('\n');
 
   const payload = await fetchOpenAIJsonWithRetry(apiKey, {
-      model: DEFAULT_EVALUATOR_MODEL,
-      store: false,
-      input: prompt,
-      text: {
-        format: {
-          type: "json_schema",
-          name: "stop_decision",
-          strict: true,
-          schema
-        }
+    model: DEFAULT_EVALUATOR_MODEL,
+    store: false,
+    input: prompt,
+    text: {
+      format: {
+        type: 'json_schema',
+        name: 'stop_decision',
+        strict: true,
+        schema
       }
-    }, {
-    timeoutMs: 25000,
-    operation: "openai_stop_evaluator"
+    }
+  }, {
+    timeoutMs: OPENAI_REQUEST_TIMEOUT_MS,
+    operation: 'openai_stop_evaluator'
   });
 
   const rawText = extractTextFromResponsePayload(payload);
   if (!rawText) {
-    throw new Error("OpenAI evaluator returned no text output");
+    throw new Error('OpenAI evaluator returned no text output');
   }
 
   return JSON.parse(rawText);
 }
 
-function mergeEvaluationWithStopDecision(heuristicEvaluation, stopDecision, roundsCompleted, maxRounds) {
-  if (!stopDecision) {
-    return {
-      ...heuristicEvaluation,
-      evaluator_mode: "fallback",
-      stop_controller: "heuristic",
-      llm_stop_decision: null
-    };
+function mergeEvaluationWithStopDecision(baseEvaluation, stopDecision, roundsCompleted, maxRounds) {
+  const resolvedQuestions = unique(stopDecision?.resolved_questions || baseEvaluation?.resolved_questions || []);
+  const missingQuestions = unique(stopDecision?.missing_questions || baseEvaluation?.missing_questions || []);
+  const riskNotes = unique(stopDecision?.risk_notes || baseEvaluation?.risk_notes || []);
+
+  let nextBestAction = stopDecision?.next_best_action || baseEvaluation?.next_best_action || 'run_follow_up_search';
+  if (roundsCompleted >= maxRounds && nextBestAction === 'run_follow_up_search') {
+    nextBestAction = 'stop_with_partial_answer';
   }
-
-  const evidenceUnits = heuristicEvaluation.metrics?.evidence_units || 0;
-  const hasAnyEvidence = evidenceUnits > 0;
-  const llmSaysAccurate = Boolean(stopDecision.should_stop && stopDecision.can_answer_accurately && hasAnyEvidence);
-  const atMaxRounds = roundsCompleted >= maxRounds;
-  const shouldStopPartially = Boolean(
-    stopDecision.should_stop
-    && !stopDecision.can_answer_accurately
-    && stopDecision.recommended_action === "stop_with_partial_answer"
-  );
-
-  let nextBestAction = llmSaysAccurate
-    ? "synthesize_answer"
-    : stopDecision.recommended_action || heuristicEvaluation.next_best_action;
-
-  if (!hasAnyEvidence && nextBestAction === "synthesize_answer") {
-    nextBestAction = atMaxRounds ? "stop_with_partial_answer" : "run_follow_up_search";
-  }
-
-  if (shouldStopPartially || atMaxRounds) {
-    nextBestAction = llmSaysAccurate ? "synthesize_answer" : "stop_with_partial_answer";
-  }
-
-  const missingQuestions = llmSaysAccurate
-    ? []
-    : unique(stopDecision.missing_information?.length ? stopDecision.missing_information : heuristicEvaluation.missing_questions);
-
-  const riskNotes = unique([
-    ...(heuristicEvaluation.risk_notes || []),
-    ...(stopDecision.risk_notes || []),
-    ...(!llmSaysAccurate && stopDecision.reasoning ? [`LLM evaluator: ${stopDecision.reasoning}`] : [])
-  ]);
 
   return {
-    ...heuristicEvaluation,
-    is_sufficient: llmSaysAccurate,
+    ...(baseEvaluation || {}),
+    is_sufficient: Boolean(stopDecision?.is_sufficient && stopDecision?.can_answer_accurately),
+    resolved_questions: resolvedQuestions,
     missing_questions: missingQuestions,
-    next_best_action: nextBestAction,
-    reason: llmSaysAccurate
-      ? (stopDecision.stop_reason || "llm evaluator confirmed the evidence is sufficient")
-      : (stopDecision.stop_reason || stopDecision.reasoning || heuristicEvaluation.reason),
     risk_notes: riskNotes,
-    evaluator_mode: "llm",
-    stop_controller: "llm",
+    follow_up_queries: unique(stopDecision?.follow_up_queries || []),
+    suggested_connector_ids: unique(stopDecision?.suggested_connector_ids || []).slice(0, 4),
+    next_best_action: nextBestAction,
+    reason: stopDecision?.reason || baseEvaluation?.reason || null,
+    metrics: {
+      source_types_covered: Number(stopDecision?.metrics?.source_types_covered || 0),
+      evidence_units: Number(stopDecision?.metrics?.evidence_units || 0),
+      overall_coverage: clamp01(stopDecision?.metrics?.overall_coverage || 0),
+      conflict_count: Number(stopDecision?.metrics?.conflict_count || 0),
+      single_source_claims: Number(stopDecision?.metrics?.single_source_claims || 0)
+    },
+    evaluator_mode: 'llm',
+    stop_controller: 'llm',
     llm_stop_decision: stopDecision,
-    follow_up_queries: unique(stopDecision.follow_up_queries || []),
-    suggested_connector_ids: unique(stopDecision.suggested_connector_ids || []).slice(0, 4),
-    answerability: stopDecision.answerability || null
+    answerability: stopDecision?.answerability || null,
+    llm_confidence: clamp01(stopDecision?.confidence || 0)
   };
 }
 
@@ -366,50 +350,41 @@ function deriveStopOutcome(evaluation) {
     return {
       should_stop_now: false,
       should_answer_now: false,
-      controller: "heuristic",
+      controller: 'llm',
       reason: null
     };
   }
 
-  if (evaluation.stop_controller === "llm" && evaluation.llm_stop_decision?.should_stop && evaluation.llm_stop_decision?.can_answer_accurately) {
+  if (evaluation.is_sufficient || evaluation.next_best_action === 'synthesize_answer') {
     return {
       should_stop_now: true,
       should_answer_now: true,
-      controller: "llm",
-      reason: "llm_stop_decision"
+      controller: 'llm',
+      reason: 'llm_sufficient'
     };
   }
 
-  if (evaluation.is_sufficient) {
-    return {
-      should_stop_now: true,
-      should_answer_now: true,
-      controller: evaluation.stop_controller || "heuristic",
-      reason: "stop_policy_satisfied"
-    };
-  }
-
-  if (evaluation.next_best_action === "stop_with_partial_answer") {
+  if (evaluation.next_best_action === 'stop_with_partial_answer') {
     return {
       should_stop_now: false,
       should_answer_now: true,
-      controller: evaluation.stop_controller || "heuristic",
-      reason: "max_rounds_reached"
+      controller: 'llm',
+      reason: 'max_rounds_reached'
     };
   }
 
   return {
     should_stop_now: false,
     should_answer_now: false,
-    controller: evaluation.stop_controller || "heuristic",
-    reason: "continue_search"
+    controller: 'llm',
+    reason: 'continue_search'
   };
 }
 
 function finalizeEvaluation(plan, evaluation, verification, roundsCompleted, stopDecision = null) {
   const stopState = deriveStopOutcome(evaluation);
   return {
-    schema_version: "evaluation.v1",
+    schema_version: 'evaluation.v1',
     ...evaluation,
     scorecard: buildEvaluationScorecard(plan, evaluation, verification, roundsCompleted, stopDecision),
     stop_state: stopState
@@ -417,33 +392,36 @@ function finalizeEvaluation(plan, evaluation, verification, roundsCompleted, sto
 }
 
 async function runStopEvaluation(plan, scratchpad, evidenceItems, verification, roundsCompleted) {
-  const maxRounds = Math.max(1, plan.stop_policy?.max_rounds || 2);
-  const heuristicEvaluation = evaluateResearch(plan, scratchpad, evidenceItems, verification, roundsCompleted);
-
+  const maxRounds = Math.max(1, plan?.stop_policy?.max_rounds || 2);
+  let stopDecision = null;
   try {
-    const stopDecision = await requestStopDecisionFromModel(plan, evidenceItems, verification, heuristicEvaluation, roundsCompleted);
-    const merged = mergeEvaluationWithStopDecision(heuristicEvaluation, stopDecision, roundsCompleted, maxRounds);
-    return finalizeEvaluation(plan, merged, verification, roundsCompleted, stopDecision);
+    stopDecision = await requestStopDecisionFromModel(plan, evidenceItems, verification, roundsCompleted, scratchpad);
   } catch (error) {
-    const fallback = {
-      ...heuristicEvaluation,
-      evaluator_mode: "fallback",
-      stop_controller: "heuristic",
+    const fallbackEvaluation = evaluateResearch(plan, scratchpad, evidenceItems, verification, roundsCompleted);
+    return finalizeEvaluation(plan, {
+      ...fallbackEvaluation,
+      follow_up_queries: fallbackEvaluation.follow_up_queries || [],
+      suggested_connector_ids: [],
+      evaluator_mode: 'heuristic',
+      stop_controller: 'heuristic',
       llm_stop_decision: null,
-      risk_notes: [...heuristicEvaluation.risk_notes, `LLM evaluator fallback: ${error.message}`]
-    };
-    return finalizeEvaluation(plan, fallback, verification, roundsCompleted, null);
+      answerability: fallbackEvaluation.is_sufficient
+        ? 'sufficient'
+        : (fallbackEvaluation.next_best_action === 'stop_with_partial_answer' ? 'partial' : 'insufficient'),
+      llm_confidence: null,
+      fallback_reason: error?.message || 'llm evaluation unavailable'
+    }, verification, roundsCompleted, null);
   }
-}
 
-function buildEmptyEvaluation(plan, roundsCompleted = 0) {
-  const evaluation = {
+  const baseEvaluation = {
     is_sufficient: false,
     resolved_questions: [],
-    missing_questions: plan.sub_questions,
-    risk_notes: ["No usable evidence was returned from the configured source connectors."],
-    next_best_action: "manual_review",
-    reason: "discovery returned no usable candidates",
+    missing_questions: plan?.sub_questions || [],
+    risk_notes: [],
+    follow_up_queries: [],
+    suggested_connector_ids: [],
+    next_best_action: 'run_follow_up_search',
+    reason: null,
     metrics: {
       source_types_covered: 0,
       evidence_units: 0,
@@ -451,11 +429,39 @@ function buildEmptyEvaluation(plan, roundsCompleted = 0) {
       conflict_count: 0,
       single_source_claims: 0
     },
-    evaluator_mode: "fallback",
-    stop_controller: "heuristic",
-    llm_stop_decision: null,
+    evaluator_mode: 'llm',
+    stop_controller: 'llm',
+    llm_stop_decision: stopDecision,
+    answerability: stopDecision.answerability || null,
+    llm_confidence: clamp01(stopDecision.confidence || 0)
+  };
+
+  const merged = mergeEvaluationWithStopDecision(baseEvaluation, stopDecision, roundsCompleted, maxRounds);
+  return finalizeEvaluation(plan, merged, verification, roundsCompleted, stopDecision);
+}
+
+function buildEmptyEvaluation(plan, roundsCompleted = 0) {
+  const evaluation = {
+    is_sufficient: false,
+    resolved_questions: [],
+    missing_questions: plan?.sub_questions || [],
+    risk_notes: ['No evidence items were collected.'],
     follow_up_queries: [],
-    suggested_connector_ids: []
+    suggested_connector_ids: [],
+    next_best_action: 'run_follow_up_search',
+    reason: 'no_evidence_items',
+    metrics: {
+      source_types_covered: 0,
+      evidence_units: 0,
+      overall_coverage: 0,
+      conflict_count: 0,
+      single_source_claims: 0
+    },
+    evaluator_mode: 'llm',
+    stop_controller: 'llm',
+    llm_stop_decision: null,
+    answerability: 'insufficient',
+    llm_confidence: 0
   };
 
   return finalizeEvaluation(plan, evaluation, { confirmations: [], conflicts: [], coverage_gaps: [] }, roundsCompleted, null);

@@ -354,9 +354,29 @@ textarea:focus {
 
 .timeline,
 .card-list,
+.memory-overview,
 .memory-grid {
   display: grid;
   gap: 12px;
+}
+
+.memory-overview {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.memory-overview-card {
+  border-radius: 18px;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(82, 55, 27, 0.12);
+}
+
+.memory-overview-title {
+  margin: 0 0 6px;
+  color: var(--accent-strong);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .timeline-item {
@@ -428,6 +448,45 @@ textarea:focus {
 
 .memory-card h4 {
   margin-bottom: 8px;
+}
+
+.memory-card-topline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.memory-flag {
+  display: inline-flex;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(181, 82, 47, 0.14);
+  color: var(--accent-strong);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.memory-flag-muted {
+  background: rgba(29, 108, 107, 0.1);
+  color: var(--teal);
+}
+
+.memory-block {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.memory-block strong {
+  color: var(--accent-strong);
+  font-size: 0.85rem;
+}
+
+.memory-block p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
 }
 
 .memory-tags span {

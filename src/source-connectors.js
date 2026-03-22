@@ -5,11 +5,22 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { verifyEvidenceUnits } = require("./fact-verifier");
-const { extractTextFromResponsePayload } = require("./openai-response");
+require("./project-env").initializeProjectEnv();
+const { extractTextFromResponsePayload, normalizeResponsesRequestBody, readResponsesApiPayload } = require("./openai-response");
 const { registerProductivityTools } = require("./productivity-tools");
 const { createToolRegistry } = require("./tool-registry-core");
 const { createConnectorRuntime } = require("./source-connectors-runtime");
 const { registerVideoTools } = require("./video-tooling");
+const {
+  normalizeGeneratedConnectorRecord,
+  readGeneratedConnectorStore
+} = require("./generated-site-connectors-store");
+const {
+  searchGeneratedSiteConnector,
+  readGeneratedSiteConnector,
+  normalizeSiteDomain: normalizeGeneratedConnectorDomain
+} = require("./generated-site-connector-runtime");
+const OPENAI_REQUEST_TIMEOUT_MS = Math.max(20000, Number(process.env.OPENSEARCH_OPENAI_TIMEOUT_MS || 90000));
 
 // Video processing configuration
 const VIDEO_PROCESSING_CONFIG = {
@@ -1667,14 +1678,32 @@ function authorityScoreForUrl(url, platform) {
   const hostname = hostFromUrl(url);
   if (/openai\.com$/.test(hostname)) return 0.97;
   if (/arxiv\.org$/.test(hostname)) return 0.95;
+  if (/reuters\.com$/.test(hostname)) return 0.93;
+  if (/apnews\.com$/.test(hostname)) return 0.92;
+  if (/xinhuanet\.com$/.test(hostname) || /news\.cn$/.test(hostname)) return 0.92;
+  if (/people\.com\.cn$/.test(hostname)) return 0.9;
+  if (/news\.cctv\.com$/.test(hostname) || /cctv\.com$/.test(hostname)) return 0.9;
+  if (/bbc\.com$/.test(hostname) || /bbc\.co\.uk$/.test(hostname)) return 0.9;
+  if (/bloomberg\.com$/.test(hostname)) return 0.91;
+  if (/nytimes\.com$/.test(hostname)) return 0.9;
+  if (/wsj\.com$/.test(hostname)) return 0.9;
+  if (/caixin\.com$/.test(hostname)) return 0.88;
+  if (/thepaper\.cn$/.test(hostname)) return 0.86;
+  if (/jiemian\.com$/.test(hostname)) return 0.84;
   if (/ted\.com$/.test(hostname)) return 0.88;
+  if (/youtube\.com$/.test(hostname) || /youtu\.be$/.test(hostname)) return 0.86;
   if (/douyin\.com$/.test(hostname) || /iesdouyin\.com$/.test(hostname)) return 0.78;
   if (/ithome\.com$/.test(hostname)) return 0.84;
   if (/segmentfault\.com$/.test(hostname)) return 0.8;
   if (/bilibili\.com$/.test(hostname)) return 0.76;
   if (/news\.ycombinator\.com$/.test(hostname)) return 0.74;
   if (/github\.com$/.test(hostname)) return 0.78;
+  if (/reddit\.com$/.test(hostname)) return 0.74;
+  if (/wikipedia\.org$/.test(hostname)) return 0.9;
+  if (/zhihu\.com$/.test(hostname)) return 0.72;
   if (/stackoverflow\.com$/.test(hostname)) return 0.8;
+  if (/planetebook\.com$/.test(hostname)) return 0.76;
+  if (/google\.com$/.test(hostname) || /blog\.google$/.test(hostname) || /developers\.google\.com$/.test(hostname) || /ai\.google\.dev$/.test(hostname) || /cloud\.google\.com$/.test(hostname) || /support\.google\.com$/.test(hostname) || /research\.google$/.test(hostname)) return 0.94;
   if (/theverge\.com$/.test(hostname)) return 0.82;
   if (platform === "Bing Web") return 0.72;
   return 0.66;
@@ -1991,8 +2020,8 @@ async function maybeSummarizeDocumentWithModel(candidate, documentKind, markdown
       "content-type": "application/json",
       authorization: `Bearer ${apiKey}`
     },
-    signal: AbortSignal.timeout(20000),
-    body: JSON.stringify({
+    signal: AbortSignal.timeout(OPENAI_REQUEST_TIMEOUT_MS),
+    body: JSON.stringify(normalizeResponsesRequestBody({
       model: process.env.OPENAI_DOCUMENT_MODEL || process.env.OPENAI_EVALUATOR_MODEL || "gpt-4o-mini",
       store: false,
       input: prompt,
@@ -2031,12 +2060,12 @@ async function maybeSummarizeDocumentWithModel(candidate, documentKind, markdown
           }
         }
       }
-    })
+    }, { forceStream: true }))
   });
 
-  const payload = await response.json();
+  const { rawText: responseText, payload } = await readResponsesApiPayload(response);
   if (!response.ok) {
-    throw new Error(payload?.error?.message || `Document model failed with HTTP ${response.status}`);
+    throw new Error(payload?.error?.message || responseText.trim() || `Document model failed with HTTP ${response.status}`);
   }
 
   const text = payload?.output
@@ -2078,8 +2107,8 @@ async function analyzeDocumentWithMultimodalModel(input) {
       "content-type": "application/json",
       authorization: `Bearer ${apiKey}`
     },
-    signal: AbortSignal.timeout(25000),
-    body: JSON.stringify({
+    signal: AbortSignal.timeout(OPENAI_REQUEST_TIMEOUT_MS),
+    body: JSON.stringify(normalizeResponsesRequestBody({
       model: process.env.OPENAI_MULTIMODAL_DOCUMENT_MODEL || process.env.OPENAI_DOCUMENT_MODEL || "gpt-4o-mini",
       store: false,
       input: [
@@ -2128,12 +2157,12 @@ async function analyzeDocumentWithMultimodalModel(input) {
           }
         }
       }
-    })
+    }, { forceStream: true }))
   });
 
-  const payload = await response.json();
+  const { rawText: responseText, payload } = await readResponsesApiPayload(response);
   if (!response.ok) {
-    throw new Error(payload?.error?.message || `Document multimodal analysis failed with HTTP ${response.status}`);
+    throw new Error(payload?.error?.message || responseText.trim() || `Document multimodal analysis failed with HTTP ${response.status}`);
   }
 
   const rawText = extractTextFromResponsePayload(payload);
@@ -2261,8 +2290,8 @@ async function analyzeDocumentLayoutWithModel(candidate, read, fallbackLayout) {
       "content-type": "application/json",
       authorization: `Bearer ${apiKey}`
     },
-    signal: AbortSignal.timeout(25000),
-    body: JSON.stringify({
+    signal: AbortSignal.timeout(OPENAI_REQUEST_TIMEOUT_MS),
+    body: JSON.stringify(normalizeResponsesRequestBody({
       model: process.env.OPENAI_LAYOUT_MODEL || process.env.OPENAI_DOCUMENT_MODEL || "gpt-4o-mini",
       store: false,
       input: prompt,
@@ -2328,12 +2357,12 @@ async function analyzeDocumentLayoutWithModel(candidate, read, fallbackLayout) {
           }
         }
       }
-    })
+    }, { forceStream: true }))
   });
 
-  const payload = await response.json();
+  const { rawText: responseText, payload } = await readResponsesApiPayload(response);
   if (!response.ok) {
-    throw new Error(payload?.error?.message || `Document layout analysis failed with HTTP ${response.status}`);
+    throw new Error(payload?.error?.message || responseText.trim() || `Document layout analysis failed with HTTP ${response.status}`);
   }
 
   const rawText = extractTextFromResponsePayload(payload);
@@ -2832,6 +2861,46 @@ function parseBingSearchMarkdown(markdown, query) {
   return candidates;
 }
 
+function parseBingSearchHtml(html, query) {
+  const candidates = [];
+  const pattern = /<li\s+class="b_algo"[^>]*>[\s\S]*?<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h2>[\s\S]*?(?:<p[^>]*>([\s\S]*?)<\/p>)?[\s\S]*?<\/li>/gi;
+  let match = null;
+
+  while ((match = pattern.exec(html)) && candidates.length < 8) {
+    const resolvedUrl = decodeBingRedirectUrl(decodeHtmlEntities(match[1]));
+    const title = stripTags(match[2]);
+    const summary = stripTags(match[3] || "");
+    if (!resolvedUrl || !title) {
+      continue;
+    }
+
+    candidates.push({
+      id: makeId("web", resolvedUrl),
+      connector: "bing_web",
+      title,
+      url: resolvedUrl,
+      platform: "Bing Web",
+      content_type: "web",
+      source_type: "web",
+      author: hostFromUrl(resolvedUrl) || "Unknown",
+      published_at: null,
+      duration: null,
+      engagement: null,
+      authority_score: authorityScoreForUrl(resolvedUrl, "Bing Web"),
+      summary: summary || `Bing Web result for ${query}`,
+      matched_query: query,
+      score: Number((1.05 - candidates.length * 0.08).toFixed(4)),
+      metadata: {
+        rank: candidates.length + 1,
+        host: hostFromUrl(resolvedUrl),
+        parser: "html_fallback"
+      }
+    });
+  }
+
+  return candidates;
+}
+
 function parseTedSearchHtml(html, query) {
   const articles = [...html.matchAll(/<article class='m1 search__result'>([\s\S]*?)<\/article>/g)];
   const candidates = [];
@@ -3043,8 +3112,412 @@ function parseHackerNewsHits(payload, query) {
 }
 
 async function searchBingWeb(query) {
-  const markdown = await fetchText(`https://r.jina.ai/http://www.bing.com/search?q=${encodeURIComponent(query)}`);
-  return parseBingSearchMarkdown(markdown, query);
+  try {
+    const markdown = await fetchText(`https://r.jina.ai/http://www.bing.com/search?q=${encodeURIComponent(query)}`, {
+      timeoutMs: 8000,
+      retries: 0
+    });
+    const candidates = parseBingSearchMarkdown(markdown, query);
+    if (candidates.length > 0) {
+      return candidates;
+    }
+  } catch (_) {
+  }
+
+  const html = await fetchText(`https://www.bing.com/search?q=${encodeURIComponent(query)}`, {
+    timeoutMs: 10000,
+    retries: 0,
+    headers: {
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8"
+    }
+  });
+  return parseBingSearchHtml(html, query);
+}
+
+function normalizeSiteConnectorCandidate(candidate, query, {
+  connectorId,
+  platform,
+  contentType = "web",
+  sourceType = "web",
+  authorityFloor = null
+}) {
+  const authorityScore = authorityFloor == null
+    ? authorityScoreForUrl(candidate.url, platform)
+    : Math.max(authorityFloor, authorityScoreForUrl(candidate.url, platform));
+
+  return {
+    ...candidate,
+    connector: connectorId,
+    platform,
+    content_type: contentType,
+    source_type: sourceType,
+    authority_score: authorityScore,
+    summary: candidate.summary || `${platform} result for ${query}`,
+    metadata: {
+      ...(candidate.metadata || {}),
+      site_connector: true
+    }
+  };
+}
+
+function createStructuredSiteConnectorCandidate({
+  connectorId,
+  platform,
+  query,
+  title,
+  url,
+  author,
+  publishedAt = null,
+  summary = "",
+  contentType = "web",
+  sourceType = "web",
+  authorityFloor = null,
+  score = 0.88,
+  engagement = null,
+  duration = null,
+  metadata = {}
+}) {
+  return normalizeSiteConnectorCandidate({
+    id: makeId(contentType === "video" ? "video" : "web", url),
+    title: normalizeWhitespace(title || platform),
+    url,
+    platform,
+    content_type: contentType,
+    source_type: sourceType,
+    author: normalizeWhitespace(author || platform),
+    published_at: publishedAt,
+    duration,
+    engagement,
+    authority_score: authorityFloor == null ? authorityScoreForUrl(url, platform) : Math.max(authorityFloor, authorityScoreForUrl(url, platform)),
+    summary: normalizeWhitespace(summary || `${platform} result for ${query}`),
+    matched_query: query,
+    score: Number(score.toFixed(4)),
+    metadata
+  }, query, {
+    connectorId,
+    platform,
+    contentType,
+    sourceType,
+    authorityFloor
+  });
+}
+
+function createBingSiteConnectorSearch({ connectorId, platform, domain, contentType = "web", sourceType = "web", authorityFloor = null }) {
+  const domains = Array.isArray(domain) ? domain : [domain];
+  return async function searchSiteConnector(query) {
+    const searchQuery = `site:${domains[0]} ${query}`;
+    const candidates = await searchBingWeb(searchQuery);
+    return candidates
+      .filter((item) => domains.some((candidateDomain) => hostFromUrl(item.url) === candidateDomain || hostFromUrl(item.url).endsWith(`.${candidateDomain}`)))
+      .map((item) => normalizeSiteConnectorCandidate(item, query, {
+        connectorId,
+        platform,
+        contentType,
+        sourceType,
+        authorityFloor
+      }))
+      .slice(0, 6);
+  };
+}
+
+async function searchAcrossBingDomains(query, domains, options = {}) {
+  const {
+    connectorId,
+    platform,
+    contentType = "web",
+    sourceType = "web",
+    authorityFloor = null,
+    maxResults = 6,
+    metadata = {}
+  } = options;
+  const uniqueDomains = Array.from(new Set((domains || []).filter(Boolean)));
+  const collected = [];
+  const seen = new Set();
+
+  for (const domain of uniqueDomains) {
+    let candidates = [];
+    try {
+      candidates = await searchBingWeb(`site:${domain} ${query}`);
+    } catch (error) {
+      continue;
+    }
+    for (const candidate of candidates) {
+      const hostname = hostFromUrl(candidate.url);
+      if (!hostname || !uniqueDomains.some((item) => hostname === item || hostname.endsWith(`.${item}`))) {
+        continue;
+      }
+      if (seen.has(candidate.url)) {
+        continue;
+      }
+      seen.add(candidate.url);
+      collected.push(normalizeSiteConnectorCandidate({
+        ...candidate,
+        metadata: {
+          ...(candidate.metadata || {}),
+          ...metadata,
+          fallback_search: true
+        }
+      }, query, {
+        connectorId,
+        platform,
+        contentType,
+        sourceType,
+        authorityFloor
+      }));
+      if (collected.length >= maxResults) {
+        return collected;
+      }
+    }
+  }
+
+  return collected;
+}
+
+function resolveUrl(url, baseUrl) {
+  try {
+    return new URL(url, baseUrl).toString();
+  } catch (error) {
+    return "";
+  }
+}
+
+function parseGenericSiteSearchHtml(html, query, {
+  connectorId,
+  platform,
+  domain,
+  searchUrl,
+  contentType = "web",
+  sourceType = "web",
+  authorityFloor = null
+}) {
+  const domains = Array.isArray(domain) ? domain : [domain];
+  const candidates = [];
+  const seen = new Set();
+  const anchorPattern = /<a\b[^>]*href=(?:"([^"]+)"|'([^']+)')[^>]*>([\s\S]*?)<\/a>/gi;
+  let match = null;
+
+  while ((match = anchorPattern.exec(html)) && candidates.length < 8) {
+    const rawHref = match[1] || match[2] || "";
+    const resolvedUrl = resolveUrl(decodeHtmlEntities(rawHref), searchUrl);
+    const hostname = hostFromUrl(resolvedUrl);
+    const title = stripTags(match[3] || "");
+    if (!resolvedUrl || !hostname || !title) {
+      continue;
+    }
+    if (!domains.some((candidateDomain) => hostname === candidateDomain || hostname.endsWith(`.${candidateDomain}`))) {
+      continue;
+    }
+    if (/\/search|\bsearch\?|\/tag\/|\/topics?\//i.test(resolvedUrl)) {
+      continue;
+    }
+    if (seen.has(resolvedUrl)) {
+      continue;
+    }
+    seen.add(resolvedUrl);
+
+    candidates.push(normalizeSiteConnectorCandidate({
+      id: makeId(contentType === "video" ? "video" : "web", resolvedUrl),
+      connector: connectorId,
+      title,
+      url: resolvedUrl,
+      platform,
+      content_type: contentType,
+      source_type: sourceType,
+      author: hostname || platform,
+      published_at: null,
+      duration: null,
+      engagement: null,
+      authority_score: authorityFloor == null ? authorityScoreForUrl(resolvedUrl, platform) : Math.max(authorityFloor, authorityScoreForUrl(resolvedUrl, platform)),
+      summary: `${platform} result for ${query}`,
+      matched_query: query,
+      score: Number((0.98 - candidates.length * 0.06).toFixed(4)),
+      metadata: {
+        rank: candidates.length + 1,
+        host: hostname,
+        parser: "native_search_html",
+        native_search: true
+      }
+    }, query, {
+      connectorId,
+      platform,
+      contentType,
+      sourceType,
+      authorityFloor
+    }));
+  }
+
+  return candidates;
+}
+
+function createNativeFirstSiteConnectorSearch({
+  connectorId,
+  platform,
+  domain,
+  searchUrlBuilder,
+  parse = parseGenericSiteSearchHtml,
+  contentType = "web",
+  sourceType = "web",
+  authorityFloor = null,
+  headers = { "accept-language": "zh-CN,zh;q=0.9,en;q=0.8" }
+}) {
+  const fallbackSearch = createBingSiteConnectorSearch({ connectorId, platform, domain, contentType, sourceType, authorityFloor });
+  return async function searchSiteConnector(query) {
+    if (typeof searchUrlBuilder === "function") {
+      try {
+        const searchUrl = searchUrlBuilder(query);
+        const html = await fetchText(searchUrl, {
+          timeoutMs: 12000,
+          retries: 0,
+          headers
+        });
+        const nativeCandidates = parse(html, query, {
+          connectorId,
+          platform,
+          domain,
+          searchUrl,
+          contentType,
+          sourceType,
+          authorityFloor
+        });
+        if (nativeCandidates.length) {
+          return nativeCandidates;
+        }
+      } catch (error) {
+      }
+    }
+    return fallbackSearch(query);
+  };
+}
+
+function extractMetaContent(html, keys = []) {
+  for (const key of keys) {
+    const patterns = [
+      new RegExp(`<meta[^>]+(?:name|property)=["']${key}["'][^>]+content=["']([^"']+)["']`, "i"),
+      new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["']${key}["']`, "i")
+    ];
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match?.[1]) {
+        return decodeHtmlEntities(match[1]).trim();
+      }
+    }
+  }
+  return "";
+}
+
+function extractTitleFromHtml(html) {
+  const ogTitle = extractMetaContent(html, ["og:title", "twitter:title"]);
+  if (ogTitle) {
+    return ogTitle;
+  }
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return titleMatch ? stripTags(titleMatch[1]) : "";
+}
+
+function extractArticleParagraphs(html) {
+  const articleMatch = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i);
+  const scope = articleMatch ? articleMatch[1] : html;
+  const paragraphs = [...scope.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)]
+    .map((item) => stripTags(item[1]))
+    .map((item) => item.replace(/\s+/g, " ").trim())
+    .filter((item) => item.length >= 40)
+    .filter((item, index, list) => list.indexOf(item) === index)
+    .slice(0, 18);
+
+  return paragraphs;
+}
+
+function isRestrictedNewsMarkdown(markdown) {
+  return /subscribe|subscription|sign in|log in|for subscribers|already a subscriber|continue reading|register to keep reading|本文仅供订阅用户|会员|订阅后继续阅读/i.test(String(markdown || ""));
+}
+
+function createNewsReadResult(candidate, {
+  title,
+  author,
+  publishedAt,
+  markdown,
+  accessLimited = false,
+  accessNotes = null
+}) {
+  return {
+    source_id: candidate.id,
+    content_type: candidate.content_type || candidate.source_type,
+    source_type: candidate.source_type,
+    tool: "deep_read_page",
+    title: title || candidate.title,
+    url: candidate.url,
+    author: author || candidate.author,
+    published_at: publishedAt || candidate.published_at,
+    markdown,
+    key_points: extractKeyPointsFromText(markdown),
+    sections: buildSectionsFromMarkdown(markdown),
+    facts: extractNumericFacts(markdown, candidate.id, candidate.connector || hostFromUrl(candidate.url) || "news_source"),
+    access_limited: accessLimited,
+    access_notes: accessNotes
+  };
+}
+
+function createNativeFirstNewsReadSource({ platform, paywalled = false }) {
+  return async function readNewsSource(candidate) {
+    try {
+      const html = await fetchText(candidate.url, {
+        timeoutMs: 15000,
+        retries: 0,
+        headers: {
+          "accept-language": "zh-CN,zh;q=0.9,en;q=0.8"
+        }
+      });
+      const title = extractTitleFromHtml(html) || candidate.title;
+      const summary = extractMetaContent(html, ["description", "og:description", "twitter:description"]);
+      const author = extractMetaContent(html, ["author", "article:author"]);
+      const publishedAt = extractMetaContent(html, ["article:published_time", "og:published_time", "publishdate", "parsely-pub-date"]);
+      const paragraphs = extractArticleParagraphs(html);
+      const body = paragraphs.join("\n\n");
+      const accessLimited = paywalled && (!body || isRestrictedNewsMarkdown(html));
+      const markdown = [
+        `# ${title}`,
+        summary ? `> ${summary}` : "",
+        body || summary || candidate.summary || `${platform} article content is not fully available from direct fetch.`,
+        accessLimited ? "\n\n[Access limited: article appears to require subscription or sign-in.]" : ""
+      ].filter(Boolean).join("\n\n");
+
+      if (body || summary) {
+        return createNewsReadResult(candidate, {
+          title,
+          author,
+          publishedAt,
+          markdown,
+          accessLimited,
+          accessNotes: accessLimited ? "subscription_or_login_required" : null
+        });
+      }
+    } catch (error) {
+    }
+
+    try {
+      const fallback = await readWebSource(candidate);
+      const accessLimited = paywalled && isRestrictedNewsMarkdown(fallback.markdown);
+      return {
+        ...fallback,
+        access_limited: accessLimited,
+        access_notes: accessLimited ? "subscription_or_login_required" : null
+      };
+    } catch (error) {
+      const markdown = [
+        `# ${candidate.title}`,
+        candidate.summary || `${platform} article content is not directly readable.`,
+        paywalled ? "[Access limited: article appears to require subscription or sign-in.]" : "[Read failed: content could not be extracted.]"
+      ].join("\n\n");
+      return createNewsReadResult(candidate, {
+        title: candidate.title,
+        author: candidate.author,
+        publishedAt: candidate.published_at,
+        markdown,
+        accessLimited: paywalled,
+        accessNotes: paywalled ? "subscription_or_login_required" : "read_failed"
+      });
+    }
+  };
 }
 
 async function searchHackerNews(query) {
@@ -3120,6 +3593,731 @@ async function searchDouyin(query) {
 async function searchTed(query) {
   const html = await fetchText(`https://www.ted.com/search?q=${encodeURIComponent(query)}`);
   return parseTedSearchHtml(html, query);
+}
+
+
+async function searchGitHub(query) {
+  try {
+    const payload = await fetchJson(`https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&per_page=6&sort=stars&order=desc`, {
+      headers: {
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28"
+      },
+      timeoutMs: 12000,
+      retries: 0
+    });
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const candidates = items
+      .filter((item) => item?.html_url && item?.full_name)
+      .map((item, index) => createStructuredSiteConnectorCandidate({
+        connectorId: "github",
+        platform: "GitHub",
+        query,
+        title: item.full_name,
+        url: item.html_url,
+        author: item.owner?.login || "GitHub",
+        publishedAt: item.updated_at || item.created_at || null,
+        summary: [
+          item.description,
+          item.language ? `Language: ${item.language}` : "",
+          Number.isFinite(item.stargazers_count) ? `${item.stargazers_count} stars` : "",
+          Number.isFinite(item.forks_count) ? `${item.forks_count} forks` : ""
+        ].filter(Boolean).join(" | "),
+        authorityFloor: 0.78,
+        score: 0.96 - index * 0.05,
+        engagement: (item.stargazers_count || 0) + (item.forks_count || 0),
+        metadata: {
+          native_search: true,
+          search_backend: "github_public_api",
+          stars: item.stargazers_count || 0,
+          forks: item.forks_count || 0,
+          language: item.language || null,
+          topics: Array.isArray(item.topics) ? item.topics.slice(0, 6) : []
+        }
+      }));
+    if (candidates.length) {
+      return candidates;
+    }
+  } catch (error) {
+  }
+
+  return createNativeFirstSiteConnectorSearch({
+    connectorId: "github",
+    platform: "GitHub",
+    domain: "github.com",
+    searchUrlBuilder: (nativeQuery) => `https://github.com/search?q=${encodeURIComponent(nativeQuery)}&type=repositories`,
+    authorityFloor: 0.78
+  })(query);
+}
+
+async function searchReddit(query) {
+  try {
+    const payload = await fetchJson(`https://www.reddit.com/search.json?q=${encodeURIComponent(query)}&limit=6&sort=relevance&t=all&raw_json=1`, {
+      headers: {
+        accept: "application/json"
+      },
+      timeoutMs: 12000,
+      retries: 0
+    });
+    const items = Array.isArray(payload?.data?.children) ? payload.data.children : [];
+    const candidates = items
+      .map((item) => item?.data)
+      .filter((item) => item?.permalink && item?.title)
+      .map((item, index) => createStructuredSiteConnectorCandidate({
+        connectorId: "reddit",
+        platform: "Reddit",
+        query,
+        title: item.title,
+        url: `https://www.reddit.com${item.permalink}`,
+        author: item.author ? `u/${item.author}` : "Reddit",
+        publishedAt: item.created_utc ? new Date(item.created_utc * 1000).toISOString() : null,
+        summary: [
+          item.selftext,
+          item.subreddit ? `r/${item.subreddit}` : "",
+          Number.isFinite(item.score) ? `${item.score} points` : "",
+          Number.isFinite(item.num_comments) ? `${item.num_comments} comments` : ""
+        ].filter(Boolean).join(" | "),
+        authorityFloor: 0.74,
+        score: 0.95 - index * 0.05,
+        engagement: (item.score || 0) + (item.num_comments || 0),
+        metadata: {
+          native_search: true,
+          search_backend: "reddit_public_json",
+          subreddit: item.subreddit || null,
+          num_comments: item.num_comments || 0,
+          is_self: item.is_self === true
+        }
+      }));
+    if (candidates.length) {
+      return candidates;
+    }
+  } catch (error) {
+  }
+
+  return createNativeFirstSiteConnectorSearch({
+    connectorId: "reddit",
+    platform: "Reddit",
+    domain: "reddit.com",
+    searchUrlBuilder: (nativeQuery) => `https://www.reddit.com/search/?q=${encodeURIComponent(nativeQuery)}`,
+    authorityFloor: 0.74
+  })(query);
+}
+
+async function searchWikipedia(query) {
+  const language = isChineseText(query) ? "zh" : "en";
+  try {
+    const payload = await fetchJson(`https://${language}.wikipedia.org/w/api.php?action=query&list=search&utf8=1&format=json&srlimit=6&srsearch=${encodeURIComponent(query)}`, {
+      headers: {
+        accept: "application/json"
+      },
+      timeoutMs: 12000,
+      retries: 0
+    });
+    const items = Array.isArray(payload?.query?.search) ? payload.query.search : [];
+    const candidates = items
+      .filter((item) => item?.title)
+      .map((item, index) => {
+        const pageUrl = `https://${language}.wikipedia.org/wiki/${encodeURIComponent(String(item.title).replace(/\s+/g, "_"))}`;
+        return createStructuredSiteConnectorCandidate({
+          connectorId: "wikipedia",
+          platform: "Wikipedia",
+          query,
+          title: item.title,
+          url: pageUrl,
+          author: `${language.toUpperCase()} Wikipedia`,
+          publishedAt: null,
+          summary: stripTags(item.snippet || item.title),
+          authorityFloor: 0.9,
+          score: 0.97 - index * 0.04,
+          metadata: {
+            native_search: true,
+            search_backend: "mediawiki_api",
+            wiki_language: language,
+            pageid: item.pageid || null,
+            wordcount: item.wordcount || null
+          }
+        });
+      });
+    if (candidates.length) {
+      return candidates;
+    }
+  } catch (error) {
+  }
+
+  return createNativeFirstSiteConnectorSearch({
+    connectorId: "wikipedia",
+    platform: "Wikipedia",
+    domain: "wikipedia.org",
+    searchUrlBuilder: (nativeQuery) => `https://${language}.wikipedia.org/w/index.php?search=${encodeURIComponent(nativeQuery)}`,
+    authorityFloor: 0.9
+  })(query);
+}
+
+function parseZhihuSearchHtml(html, query, context = {}) {
+  const genericCandidates = parseGenericSiteSearchHtml(html, query, {
+    connectorId: "zhihu",
+    platform: "Zhihu",
+    domain: "zhihu.com",
+    searchUrl: context.searchUrl || "https://www.zhihu.com/",
+    authorityFloor: 0.72
+  });
+
+  return genericCandidates
+    .filter((candidate) => /zhihu\.com\/(question\/\d+|p\/\d+|zvideo\/\d+|column\/[^/?#]+)/i.test(candidate.url))
+    .map((candidate) => ({
+      ...candidate,
+      metadata: {
+        ...(candidate.metadata || {}),
+        native_search: true,
+        search_backend: "zhihu_html"
+      }
+    }));
+}
+
+async function searchZhihu(query) {
+  return createNativeFirstSiteConnectorSearch({
+    connectorId: "zhihu",
+    platform: "Zhihu",
+    domain: "zhihu.com",
+    searchUrlBuilder: (nativeQuery) => `https://www.zhihu.com/search?type=content&q=${encodeURIComponent(nativeQuery)}`,
+    parse: parseZhihuSearchHtml,
+    authorityFloor: 0.72,
+    headers: {
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8"
+    }
+  })(query);
+}
+
+const GOOGLE_CONNECTOR_DOMAINS = [
+  "google.com",
+  "blog.google",
+  "developers.google.com",
+  "ai.google.dev",
+  "cloud.google.com",
+  "support.google.com",
+  "research.google"
+];
+
+function markNativeSearchCandidates(candidates, searchBackend) {
+  return candidates.map((candidate) => ({
+    ...candidate,
+    metadata: {
+      ...(candidate.metadata || {}),
+      native_search: true,
+      search_backend: searchBackend
+    }
+  }));
+}
+
+async function searchPlanetEbook(query) {
+  return createNativeFirstSiteConnectorSearch({
+    connectorId: "planetebook",
+    platform: "Planet eBook",
+    domain: "planetebook.com",
+    searchUrlBuilder: (nativeQuery) => `https://www.planetebook.com/?s=${encodeURIComponent(nativeQuery)}`,
+    contentType: "document",
+    sourceType: "document",
+    authorityFloor: 0.76,
+    headers: {
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "en-US,en;q=0.9"
+    }
+  })(query);
+}
+
+async function searchGoogle(query) {
+  const domainClause = GOOGLE_CONNECTOR_DOMAINS.map((domain) => `site:${domain}`).join(" OR ");
+  const searchQuery = `${query} ${domainClause}`;
+  try {
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
+    const html = await fetchText(searchUrl, {
+      timeoutMs: 12000,
+      retries: 0,
+      headers: {
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "en-US,en;q=0.9"
+      }
+    });
+    const nativeCandidates = parseGenericSiteSearchHtml(html, query, {
+      connectorId: "google",
+      platform: "Google",
+      domain: GOOGLE_CONNECTOR_DOMAINS,
+      searchUrl,
+      authorityFloor: 0.94
+    });
+    if (nativeCandidates.length) {
+      return markNativeSearchCandidates(nativeCandidates, "google_search_html").slice(0, 6);
+    }
+  } catch (error) {
+  }
+
+  return searchAcrossBingDomains(query, GOOGLE_CONNECTOR_DOMAINS, {
+    connectorId: "google",
+    platform: "Google",
+    authorityFloor: 0.94,
+    maxResults: 6,
+    metadata: {
+      search_backend: "bing_multi_site"
+    }
+  });
+}
+
+async function searchStackOverflow(query) {
+  try {
+    const payload = await fetchJson(`https://api.stackexchange.com/2.3/search/excerpts?order=desc&sort=relevance&q=${encodeURIComponent(query)}&site=stackoverflow&pagesize=6&filter=withbody`, {
+      headers: {
+        accept: "application/json"
+      },
+      timeoutMs: 12000,
+      retries: 0
+    });
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const candidates = items
+      .filter((item) => item?.link && item?.title)
+      .map((item, index) => createStructuredSiteConnectorCandidate({
+        connectorId: "stack_overflow",
+        platform: "Stack Overflow",
+        query,
+        title: stripTags(item.title),
+        url: item.link,
+        author: item.owner?.display_name || "Stack Overflow",
+        publishedAt: item.creation_date ? new Date(item.creation_date * 1000).toISOString() : null,
+        summary: stripTags(item.excerpt || item.body || item.title),
+        authorityFloor: 0.8,
+        score: 0.95 - index * 0.05,
+        engagement: (item.score || 0) + (item.answer_count || 0),
+        metadata: {
+          native_search: true,
+          search_backend: "stackexchange_api",
+          tags: Array.isArray(item.tags) ? item.tags.slice(0, 6) : [],
+          answer_count: item.answer_count || 0,
+          is_answered: item.is_answered === true
+        }
+      }));
+    if (candidates.length) {
+      return candidates;
+    }
+  } catch (error) {
+  }
+
+  return createNativeFirstSiteConnectorSearch({
+    connectorId: "stack_overflow",
+    platform: "Stack Overflow",
+    domain: "stackoverflow.com",
+    searchUrlBuilder: (nativeQuery) => `https://stackoverflow.com/search?q=${encodeURIComponent(nativeQuery)}`,
+    authorityFloor: 0.8
+  })(query);
+}
+
+function extractBalancedJsonBlock(text, startIndex) {
+  const source = String(text || "");
+  const start = Number(startIndex);
+  if (!Number.isInteger(start) || start < 0 || start >= source.length) {
+    return null;
+  }
+
+  const opening = source[start];
+  const closing = opening === "{" ? "}" : (opening === "[" ? "]" : null);
+  if (!closing) {
+    return null;
+  }
+
+  const stack = [closing];
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        inString = false;
+        quote = "";
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      inString = true;
+      quote = char;
+      continue;
+    }
+
+    if (char === "{") {
+      stack.push("}");
+      continue;
+    }
+    if (char === "[") {
+      stack.push("]");
+      continue;
+    }
+    if (char === stack[stack.length - 1]) {
+      stack.pop();
+      if (stack.length === 0) {
+        return source.slice(start, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractJsonFromHtmlByMarkers(html, markers = []) {
+  const source = String(html || "");
+  for (const marker of markers) {
+    const markerIndex = source.indexOf(marker);
+    if (markerIndex === -1) {
+      continue;
+    }
+    const start = source.slice(markerIndex + marker.length).search(/[\[{]/);
+    if (start === -1) {
+      continue;
+    }
+    const jsonStart = markerIndex + marker.length + start;
+    const block = extractBalancedJsonBlock(source, jsonStart);
+    if (!block) {
+      continue;
+    }
+    try {
+      return JSON.parse(block);
+    } catch (_) {
+      continue;
+    }
+  }
+  return null;
+}
+
+function readYouTubeTextNode(node) {
+  if (!node) {
+    return "";
+  }
+  if (typeof node === "string") {
+    return normalizeWhitespace(node);
+  }
+  if (typeof node.simpleText === "string") {
+    return normalizeWhitespace(node.simpleText);
+  }
+  if (Array.isArray(node.runs)) {
+    return normalizeWhitespace(node.runs.map((item) => item?.text || "").join(" "));
+  }
+  return "";
+}
+
+function collectYouTubeVideoRenderers(root, limit = 12) {
+  const results = [];
+
+  function visit(node) {
+    if (!node || results.length >= limit) {
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        visit(item);
+        if (results.length >= limit) {
+          break;
+        }
+      }
+      return;
+    }
+    if (typeof node !== "object") {
+      return;
+    }
+    if (node.videoRenderer && typeof node.videoRenderer === "object") {
+      results.push(node.videoRenderer);
+      return;
+    }
+    for (const value of Object.values(node)) {
+      visit(value);
+      if (results.length >= limit) {
+        break;
+      }
+    }
+  }
+
+  visit(root);
+  return results;
+}
+
+function extractYouTubeSearchDuration(renderer) {
+  const direct = readYouTubeTextNode(renderer.lengthText);
+  if (direct) {
+    return direct;
+  }
+  const overlays = Array.isArray(renderer.thumbnailOverlays) ? renderer.thumbnailOverlays : [];
+  for (const overlay of overlays) {
+    const label = readYouTubeTextNode(overlay?.thumbnailOverlayTimeStatusRenderer?.text);
+    if (label) {
+      return label;
+    }
+  }
+  return null;
+}
+
+function parseYouTubeSearchHtml(html, query) {
+  const initialData = extractJsonFromHtmlByMarkers(html, [
+    "var ytInitialData = ",
+    "window['ytInitialData'] = ",
+    "window[\"ytInitialData\"] = ",
+    "ytInitialData = "
+  ]);
+  if (!initialData) {
+    return [];
+  }
+
+  const renderers = collectYouTubeVideoRenderers(initialData, 12);
+  const seen = new Set();
+  const candidates = [];
+
+  for (const renderer of renderers) {
+    const videoId = renderer.videoId;
+    if (!videoId) {
+      continue;
+    }
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    if (seen.has(url)) {
+      continue;
+    }
+    seen.add(url);
+
+    const title = readYouTubeTextNode(renderer.title) || `YouTube video for ${query}`;
+    const author = readYouTubeTextNode(renderer.ownerText) || readYouTubeTextNode(renderer.longBylineText) || null;
+    const publishedLabel = readYouTubeTextNode(renderer.publishedTimeText) || null;
+    const duration = extractYouTubeSearchDuration(renderer);
+    const views = readYouTubeTextNode(renderer.viewCountText) || readYouTubeTextNode(renderer.shortViewCountText) || null;
+    const description = [
+      readYouTubeTextNode(renderer.descriptionSnippet),
+      ...(Array.isArray(renderer.detailedMetadataSnippets)
+        ? renderer.detailedMetadataSnippets.map((item) => readYouTubeTextNode(item?.snippetText))
+        : [])
+    ].filter(Boolean).join(" ");
+    const thumbnails = Array.isArray(renderer.thumbnail?.thumbnails)
+      ? renderer.thumbnail.thumbnails.map((item) => item?.url).filter(Boolean)
+      : [];
+    const candidate = normalizeSiteConnectorCandidate({
+      id: makeId("video", url),
+      title,
+      url,
+      author,
+      published_at: publishedLabel,
+      duration,
+      summary: description || [author, views, publishedLabel].filter(Boolean).join(" | "),
+      score: Number(Math.max(0.58, 0.93 - (candidates.length * 0.05)).toFixed(4)),
+      metadata: {
+        preview_image: thumbnails[thumbnails.length - 1] || null,
+        page_images: thumbnails.slice(-3),
+        views,
+        published_label: publishedLabel,
+        native_search: true,
+        video_id: videoId
+      }
+    }, query, {
+      connectorId: "youtube",
+      platform: "YouTube",
+      contentType: "video",
+      sourceType: "video",
+      authorityFloor: 0.86
+    });
+    candidates.push(candidate);
+    if (candidates.length >= 8) {
+      break;
+    }
+  }
+
+  return candidates;
+}
+
+async function searchYouTube(query) {
+  try {
+    const html = await fetchText(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, {
+      timeoutMs: 12000,
+      retries: 0,
+      headers: {
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "en-US,en;q=0.9"
+      }
+    });
+    const nativeCandidates = parseYouTubeSearchHtml(html, query);
+    if (nativeCandidates.length > 0) {
+      return nativeCandidates;
+    }
+  } catch (_) {
+  }
+
+  return createBingSiteConnectorSearch({
+    connectorId: "youtube",
+    platform: "YouTube",
+    domain: ["youtube.com", "youtu.be"],
+    contentType: "video",
+    sourceType: "video",
+    authorityFloor: 0.86
+  })(query);
+}
+
+function parseIso8601DurationToTimestamp(value) {
+  const raw = String(value || "").trim();
+  const match = raw.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i);
+  if (!match) {
+    return null;
+  }
+
+  const hours = Number(match[1] || 0);
+  const minutes = Number(match[2] || 0);
+  const seconds = Number(match[3] || 0);
+  const totalSeconds = (hours * 3600) + (minutes * 60) + seconds;
+  return totalSeconds > 0 ? timestampFromMilliseconds(totalSeconds * 1000) : null;
+}
+
+function parseYouTubePageMetadata(html, candidate = {}) {
+  const normalizedHtml = String(html || "");
+  const titleMatch = normalizedHtml.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)
+    || normalizedHtml.match(/<title>([^<]+)<\/title>/i);
+  const descriptionMatch = normalizedHtml.match(/<meta[^>]+(?:name|property)="(?:description|og:description)"[^>]+content="([^"]+)"/i);
+  const imageMatch = normalizedHtml.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i);
+  const authorMatch = normalizedHtml.match(/<link[^>]+itemprop="name"[^>]+content="([^"]+)"/i)
+    || normalizedHtml.match(/<meta[^>]+itemprop="author"[^>]+content="([^"]+)"/i)
+    || normalizedHtml.match(/"ownerChannelName":"([^"]+)"/i);
+  const publishedAtMatch = normalizedHtml.match(/<meta[^>]+itemprop="datePublished"[^>]+content="([^"]+)"/i)
+    || normalizedHtml.match(/"publishDate":"([^"]+)"/i);
+  const durationMatch = normalizedHtml.match(/<meta[^>]+itemprop="duration"[^>]+content="([^"]+)"/i);
+
+  let structured = null;
+  const ldJsonMatches = [...normalizedHtml.matchAll(/<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
+  for (const match of ldJsonMatches) {
+    try {
+      const payload = JSON.parse(match[1]);
+      const records = Array.isArray(payload) ? payload : [payload];
+      structured = records.find((item) => item?.["@type"] === "VideoObject") || structured;
+      if (structured) {
+        break;
+      }
+    } catch (_) {
+      // Ignore malformed JSON-LD blocks.
+    }
+  }
+
+  const title = stripTags(decodeHtmlEntities(structured?.name || titleMatch?.[1] || candidate.title || "")).replace(/\s*-\s*YouTube$/i, "").trim();
+  const description = normalizeWhitespace(stripTags(decodeHtmlEntities(structured?.description || descriptionMatch?.[1] || candidate.summary || "")));
+  const author = normalizeWhitespace(stripTags(decodeHtmlEntities(structured?.author?.name || authorMatch?.[1] || candidate.author || ""))) || null;
+  const publishedAt = structured?.uploadDate || publishedAtMatch?.[1] || candidate.published_at || null;
+  const duration = parseIso8601DurationToTimestamp(structured?.duration || durationMatch?.[1]);
+  const previewImage = resolveAbsoluteUrl(candidate.url, structured?.thumbnailUrl || imageMatch?.[1] || candidate.metadata?.preview_image || null);
+
+  return {
+    title: title || candidate.title,
+    description,
+    author,
+    published_at: publishedAt,
+    duration,
+    preview_image: previewImage
+  };
+}
+
+function extractYouTubePlayerResponse(html) {
+  return extractJsonFromHtmlByMarkers(html, [
+    "var ytInitialPlayerResponse = ",
+    "window['ytInitialPlayerResponse'] = ",
+    "window[\"ytInitialPlayerResponse\"] = ",
+    "ytInitialPlayerResponse = "
+  ]);
+}
+
+function selectYouTubeCaptionTrack(tracks = []) {
+  if (!Array.isArray(tracks) || tracks.length === 0) {
+    return null;
+  }
+
+  const scored = tracks.map((track, index) => {
+    const languageCode = String(track.languageCode || "").toLowerCase();
+    const vssId = String(track.vssId || "").toLowerCase();
+    const name = readYouTubeTextNode(track.name).toLowerCase();
+    let score = 0;
+    if (!/^a\./.test(vssId)) score += 4;
+    if (languageCode === "en") score += 3;
+    if (languageCode.startsWith("en-")) score += 2;
+    if (!/auto|generated/.test(name)) score += 1;
+    return { track, score, index };
+  });
+
+  scored.sort((left, right) => right.score - left.score || left.index - right.index);
+  return scored[0]?.track || null;
+}
+
+function parseYouTubeCaptionJson3(payload) {
+  const data = typeof payload === "string" ? JSON.parse(payload) : (payload || {});
+  const events = Array.isArray(data.events) ? data.events : [];
+  return events
+    .map((event) => {
+      const text = normalizeWhitespace((event.segs || []).map((segment) => decodeHtmlEntities(segment?.utf8 || "")).join(""));
+      const startSeconds = Number(event.tStartMs || 0) / 1000;
+      if (!text) {
+        return null;
+      }
+      return {
+        start: startSeconds,
+        dur: Number(event.dDurationMs || 0) / 1000,
+        time: timestampFromMilliseconds(startSeconds * 1000),
+        text
+      };
+    })
+    .filter(Boolean);
+}
+
+function parseYouTubeCaptionXml(xml) {
+  return [...String(xml || "").matchAll(/<text\b[^>]*start="([^"]+)"[^>]*?(?:dur="([^"]+)")?[^>]*>([\s\S]*?)<\/text>/gi)]
+    .map((match) => {
+      const startSeconds = Number(match[1] || 0);
+      const durSeconds = Number(match[2] || 0);
+      const text = normalizeWhitespace(decodeHtmlEntities(match[3]).replace(/<[^>]+>/g, " "));
+      if (!text) {
+        return null;
+      }
+      return {
+        start: startSeconds,
+        dur: durSeconds,
+        time: timestampFromMilliseconds(startSeconds * 1000),
+        text
+      };
+    })
+    .filter(Boolean);
+}
+
+async function fetchYouTubeCaptionTrack(track) {
+  if (!track?.baseUrl) {
+    return [];
+  }
+
+  const jsonUrl = new URL(track.baseUrl);
+  jsonUrl.searchParams.set("fmt", "json3");
+  try {
+    const payload = await fetchJson(jsonUrl.toString(), {
+      timeoutMs: 10000,
+      retries: 0,
+      headers: {
+        accept: "application/json,text/plain;q=0.9,*/*;q=0.8"
+      }
+    });
+    const cues = parseYouTubeCaptionJson3(payload);
+    if (cues.length > 0) {
+      return cues;
+    }
+  } catch (_) {
+  }
+
+  const xmlUrl = new URL(track.baseUrl);
+  xmlUrl.searchParams.delete("fmt");
+  const xml = await fetchText(xmlUrl.toString(), {
+    timeoutMs: 10000,
+    retries: 0,
+    headers: {
+      accept: "text/xml,application/xml,text/plain;q=0.9,*/*;q=0.8"
+    }
+  });
+  return parseYouTubeCaptionXml(xml);
 }
 
 function dedupeCandidates(candidates) {
@@ -3198,8 +4396,283 @@ const connectorRegistry = [
     capabilities: ["search", "video", "talks", "transcripts", "video metadata"],
     search: searchTed,
     read: readTedSource
+  },
+  {
+    id: "youtube",
+    label: "YouTube",
+    description: "Global video platform for talks, tutorials, interviews, and creator content.",
+    capabilities: ["search", "video", "talks", "tutorials", "transcripts", "video metadata"],
+    domains: ["youtube.com", "youtu.be"],
+    search: searchYouTube,
+    read: readYouTubeSource
+  },
+  {
+    id: "xinhua",
+    label: "Xinhua",
+    description: "Chinese state news source for official reporting and breaking news coverage.",
+    capabilities: ["search", "news", "china news", "official reporting", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "xinhua",
+      platform: "Xinhua",
+      domain: ["xinhuanet.com", "news.cn"],
+      searchUrlBuilder: (query) => `https://so.news.cn/?keyword=${encodeURIComponent(query)}`,
+      authorityFloor: 0.92
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "Xinhua" })
+  },
+  {
+    id: "people",
+    label: "People.cn",
+    description: "Chinese official news source for public affairs, policy, and major events.",
+    capabilities: ["search", "news", "china news", "official reporting", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "people",
+      platform: "People.cn",
+      domain: "people.com.cn",
+      searchUrlBuilder: (query) => `http://search.people.com.cn/s?keyword=${encodeURIComponent(query)}`,
+      authorityFloor: 0.9
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "People.cn" })
+  },
+  {
+    id: "cctv_news",
+    label: "CCTV News",
+    description: "Chinese broadcast news source for major events, policy, and official video-backed reports.",
+    capabilities: ["search", "news", "china news", "official reporting", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "cctv_news",
+      platform: "CCTV News",
+      domain: ["news.cctv.com", "cctv.com"],
+      searchUrlBuilder: (query) => `https://search.cctv.com/search.php?qtext=${encodeURIComponent(query)}`,
+      authorityFloor: 0.9
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "CCTV News" })
+  },
+  {
+    id: "the_paper",
+    label: "The Paper",
+    description: "Chinese mainstream news source for current affairs, investigations, and explanatory reporting.",
+    capabilities: ["search", "news", "china news", "current affairs", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "the_paper",
+      platform: "The Paper",
+      domain: "thepaper.cn",
+      searchUrlBuilder: (query) => `https://www.thepaper.cn/searchResult?id=${encodeURIComponent(query)}`,
+      authorityFloor: 0.86
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "The Paper" })
+  },
+  {
+    id: "caixin",
+    label: "Caixin",
+    description: "Chinese business news source for finance, policy, and enterprise coverage.",
+    capabilities: ["search", "news", "business news", "finance", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "caixin",
+      platform: "Caixin",
+      domain: "caixin.com",
+      searchUrlBuilder: (query) => `https://search.caixin.com/search/${encodeURIComponent(query)}.html`,
+      authorityFloor: 0.88
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "Caixin", paywalled: true })
+  },
+  {
+    id: "jiemian",
+    label: "Jiemian",
+    description: "Chinese business and market news source for companies, industries, and commentary.",
+    capabilities: ["search", "news", "business news", "markets", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "jiemian",
+      platform: "Jiemian",
+      domain: "jiemian.com",
+      searchUrlBuilder: (query) => `https://www.jiemian.com/search?searchText=${encodeURIComponent(query)}`,
+      authorityFloor: 0.84
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "Jiemian" })
+  },
+  {
+    id: "reuters",
+    label: "Reuters",
+    description: "International wire service for breaking news, markets, and official reporting.",
+    capabilities: ["search", "news", "breaking news", "international news", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "reuters",
+      platform: "Reuters",
+      domain: "reuters.com",
+      searchUrlBuilder: (query) => `https://www.reuters.com/site-search/?query=${encodeURIComponent(query)}`,
+      authorityFloor: 0.93
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "Reuters" })
+  },
+  {
+    id: "ap_news",
+    label: "AP News",
+    description: "Associated Press news source for breaking news and factual reporting.",
+    capabilities: ["search", "news", "breaking news", "international news", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "ap_news",
+      platform: "AP News",
+      domain: "apnews.com",
+      searchUrlBuilder: (query) => `https://apnews.com/search?q=${encodeURIComponent(query)}`,
+      authorityFloor: 0.92
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "AP News" })
+  },
+  {
+    id: "bbc_news",
+    label: "BBC News",
+    description: "International public-service news source for breaking events and explainers.",
+    capabilities: ["search", "news", "international news", "explainers", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "bbc_news",
+      platform: "BBC News",
+      domain: ["bbc.com", "bbc.co.uk"],
+      searchUrlBuilder: (query) => `https://www.bbc.co.uk/search?q=${encodeURIComponent(query)}`,
+      authorityFloor: 0.9
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "BBC News" })
+  },
+  {
+    id: "bloomberg",
+    label: "Bloomberg",
+    description: "Global business news source for markets, companies, and macroeconomic coverage.",
+    capabilities: ["search", "news", "business news", "markets", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "bloomberg",
+      platform: "Bloomberg",
+      domain: "bloomberg.com",
+      searchUrlBuilder: (query) => `https://www.bloomberg.com/search?query=${encodeURIComponent(query)}`,
+      authorityFloor: 0.91
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "Bloomberg", paywalled: true })
+  },
+  {
+    id: "nytimes",
+    label: "The New York Times",
+    description: "International newspaper source for politics, business, and long-form reporting.",
+    capabilities: ["search", "news", "international news", "analysis", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "nytimes",
+      platform: "The New York Times",
+      domain: "nytimes.com",
+      searchUrlBuilder: (query) => `https://www.nytimes.com/search?query=${encodeURIComponent(query)}`,
+      authorityFloor: 0.9
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "The New York Times", paywalled: true })
+  },
+  {
+    id: "wsj",
+    label: "The Wall Street Journal",
+    description: "Business and finance newspaper source for markets, companies, and policy coverage.",
+    capabilities: ["search", "news", "business news", "markets", "content extraction"],
+    search: createNativeFirstSiteConnectorSearch({
+      connectorId: "wsj",
+      platform: "The Wall Street Journal",
+      domain: "wsj.com",
+      searchUrlBuilder: (query) => `https://www.wsj.com/search?query=${encodeURIComponent(query)}`,
+      authorityFloor: 0.9
+    }),
+    read: createNativeFirstNewsReadSource({ platform: "The Wall Street Journal", paywalled: true })
+  },
+  {
+    id: "planetebook",
+    label: "Planet eBook",
+    description: "Free classic literature source for downloadable eBooks, author pages, and reading formats.",
+    capabilities: ["search", "ebooks", "books", "classics", "content extraction"],
+    search: searchPlanetEbook,
+    read: readWebSource
+  },
+  {
+    id: "google",
+    label: "Google",
+    description: "Official Google source for product announcements, documentation, help content, and research pages.",
+    capabilities: ["search", "official pages", "docs", "product updates", "content extraction"],
+    search: searchGoogle,
+    read: readWebSource
+  },
+  {
+    id: "github",
+    label: "GitHub",
+    description: "Code hosting source for repositories, issues, documentation, and release notes.",
+    capabilities: ["search", "code", "repositories", "issues", "docs", "content extraction"],
+    search: searchGitHub,
+    read: readWebSource
+  },
+  {
+    id: "reddit",
+    label: "Reddit",
+    description: "Community discussion source for user reports, troubleshooting, and sentiment.",
+    capabilities: ["search", "discussion", "community", "user reports", "content extraction"],
+    search: searchReddit,
+    read: readWebSource
+  },
+  {
+    id: "wikipedia",
+    label: "Wikipedia",
+    description: "Reference source for encyclopedic summaries and historical background.",
+    capabilities: ["search", "reference", "encyclopedia", "background", "content extraction"],
+    search: searchWikipedia,
+    read: readWebSource
+  },
+  {
+    id: "zhihu",
+    label: "Zhihu",
+    description: "Chinese knowledge community source for explainers, Q&A, and commentary.",
+    capabilities: ["search", "community", "q&a", "explainers", "content extraction"],
+    search: searchZhihu,
+    read: readWebSource
+  },
+  {
+    id: "stack_overflow",
+    label: "Stack Overflow",
+    description: "Developer Q&A source for implementation details, debugging, and code examples.",
+    capabilities: ["search", "q&a", "developer", "debugging", "content extraction"],
+    search: searchStackOverflow,
+    read: readWebSource
   }
 ];
+
+const STATIC_CONNECTOR_DOMAINS = {
+  bing_web: [],
+  hacker_news: ["news.ycombinator.com", "hn.algolia.com"],
+  segmentfault: ["segmentfault.com"],
+  ithome: ["ithome.com"],
+  arxiv: ["arxiv.org"],
+  bilibili: ["bilibili.com"],
+  douyin: ["douyin.com", "iesdouyin.com"],
+  ted: ["ted.com"],
+  github: ["github.com"],
+  reddit: ["reddit.com"],
+  wikipedia: ["wikipedia.org"],
+  zhihu: ["zhihu.com"],
+  stack_overflow: ["stackoverflow.com"],
+  planetebook: ["planetebook.com"],
+  google: GOOGLE_CONNECTOR_DOMAINS
+};
+
+function finalizeConnectorMetadata(connector, overrides = {}) {
+  const normalizedDomains = Array.from(new Set([
+    ...((overrides.domains || connector.domains || STATIC_CONNECTOR_DOMAINS[connector.id] || []).map((item) => normalizeGeneratedConnectorDomain(item)))
+  ].filter(Boolean)));
+  connector.generated = overrides.generated === true || connector.generated === true;
+  connector.domains = normalizedDomains;
+  connector.supports_search = overrides.supports_search != null
+    ? overrides.supports_search === true
+    : typeof connector.search === "function";
+  connector.supports_read = overrides.supports_read != null
+    ? overrides.supports_read === true
+    : typeof connector.read === "function";
+  connector.capabilities = Array.from(new Set([
+    ...(Array.isArray(connector.capabilities) ? connector.capabilities : []),
+    ...(connector.supports_search ? ["search"] : []),
+    ...(connector.supports_read ? ["content extraction"] : [])
+  ]));
+  return connector;
+}
+
+for (const connector of connectorRegistry) {
+  finalizeConnectorMetadata(connector, { generated: false });
+}
 
 const connectorRuntime = createConnectorRuntime({
   connectorRegistry,
@@ -3213,6 +4686,125 @@ const invokeSourceTool = connectorRuntime.invokeSourceTool;
 const searchRealSources = connectorRuntime.searchRealSources;
 const readCandidate = connectorRuntime.readCandidate;
 sourceCatalog = connectorRuntime.sourceCatalog;
+
+function getConnectorById(connectorId) {
+  return connectorMap.get(connectorId) || null;
+}
+
+function connectorSupportsDomain(connector, domain) {
+  const normalizedDomain = normalizeGeneratedConnectorDomain(domain);
+  if (!connector || !normalizedDomain) {
+    return false;
+  }
+  return (connector.domains || []).some((item) => item === normalizedDomain || normalizedDomain.endsWith(`.${item}`) || item.endsWith(`.${normalizedDomain}`));
+}
+
+function findConnectorByDomain(domain) {
+  const normalizedDomain = normalizeGeneratedConnectorDomain(domain);
+  if (!normalizedDomain) {
+    return null;
+  }
+  return sourceCatalog.find((connector) => connectorSupportsDomain(connector, normalizedDomain)) || null;
+}
+
+function ensureGeneratedConnectorTools(record) {
+  const readToolId = record.tool_ids?.read || `generated_read_${record.id}`;
+  const searchToolId = record.tool_ids?.search || `generated_search_${record.id}`;
+
+  if (!ToolRegistry.getTool(readToolId)) {
+    ToolRegistry.registerTool({
+      id: readToolId,
+      base_tool_id: readToolId,
+      name: `${record.label} Read`,
+      description: `Read public pages from ${record.domain} through the generated connector runtime.`,
+      parameters: [{ name: "candidate", type: "object", required: true, description: "Candidate to read" }],
+      execute: async ({ candidate }) => readGeneratedSiteConnector(candidate, record),
+      source: "dynamic",
+      status: "active",
+      lifecycle_state: "registered",
+      promoted_to_builtin: true,
+      created_for: "llm_orchestrator"
+    });
+  }
+
+  if (record.supports_search && !ToolRegistry.getTool(searchToolId)) {
+    ToolRegistry.registerTool({
+      id: searchToolId,
+      base_tool_id: searchToolId,
+      name: `${record.label} Search`,
+      description: `Search ${record.domain} through the generated connector runtime.`,
+      parameters: [{ name: "query", type: "string", required: true, description: "Query to search" }],
+      execute: async ({ query }) => ({ results: await searchGeneratedSiteConnector(query, record) }),
+      source: "dynamic",
+      status: "active",
+      lifecycle_state: "registered",
+      promoted_to_builtin: true,
+      created_for: "llm_orchestrator"
+    });
+  }
+}
+
+function registerGeneratedSiteConnector(record) {
+  const normalized = normalizeGeneratedConnectorRecord(record);
+  const existing = connectorMap.get(normalized.id);
+  if (existing) {
+    finalizeConnectorMetadata(existing, normalized);
+    return existing;
+  }
+
+  ensureGeneratedConnectorTools(normalized);
+
+  const generatedConnector = finalizeConnectorMetadata({
+    id: normalized.id,
+    label: normalized.label,
+    description: normalized.description,
+    capabilities: normalized.capabilities,
+    generated: true,
+    domains: normalized.domains,
+    supports_search: normalized.supports_search,
+    supports_read: normalized.supports_read,
+    tool_id: normalized.tool_id,
+    tool_ids: normalized.tool_ids,
+    status: normalized.status,
+    search_config: normalized.search_config,
+    last_verification: normalized.last_verification,
+    last_verified_at: normalized.last_verified_at,
+    search: normalized.supports_search
+      ? async (query) => searchGeneratedSiteConnector(query, normalized)
+      : async () => [],
+    read: normalized.supports_read
+      ? async (candidate) => readGeneratedSiteConnector(candidate, normalized)
+      : null
+  }, normalized);
+
+  connectorRegistry.push(generatedConnector);
+  connectorMap.set(generatedConnector.id, generatedConnector);
+  sourceCatalog.push({
+    id: generatedConnector.id,
+    label: generatedConnector.label,
+    description: generatedConnector.description,
+    capabilities: generatedConnector.capabilities,
+    generated: true,
+    domains: generatedConnector.domains,
+    supports_search: generatedConnector.supports_search,
+    supports_read: generatedConnector.supports_read,
+    tool_id: generatedConnector.tool_id,
+    tool_ids: generatedConnector.tool_ids,
+    status: generatedConnector.status,
+    last_verified_at: generatedConnector.last_verified_at || null
+  });
+  return generatedConnector;
+}
+
+function loadPersistedGeneratedSiteConnectors() {
+  const store = readGeneratedConnectorStore();
+  for (const record of store.connectors.filter((item) => item.status !== "deleted")) {
+    registerGeneratedSiteConnector(record);
+  }
+  return store.connectors.length;
+}
+
+loadPersistedGeneratedSiteConnectors();
 
 async function readWebSource(candidate) {
   const raw = await fetchText(toReaderUrl(candidate.url));
@@ -4130,8 +5722,127 @@ async function readTedSource(candidate) {
   };
 }
 
+async function readYouTubeSource(candidate) {
+  const html = await fetchText(candidate.url, {
+    timeoutMs: 10000,
+    retries: 0,
+    headers: {
+      accept: "text/html,application/xhtml+xml"
+    }
+  });
+
+  const parsed = parseYouTubePageMetadata(html, candidate);
+  const playerResponse = extractYouTubePlayerResponse(html) || {};
+  const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+  const selectedTrack = selectYouTubeCaptionTrack(captionTracks);
+  let transcriptSource = null;
+  let transcript = [];
+  let timeline = [];
+  let keyPoints = [
+    parsed.description ? parsed.description.slice(0, 220) : candidate.summary,
+    parsed.author ? `Author ${parsed.author}` : null,
+    parsed.duration ? `Duration ${parsed.duration}` : null
+  ].filter(Boolean);
+
+  try {
+    if (selectedTrack) {
+      transcript = await fetchYouTubeCaptionTrack(selectedTrack);
+      timeline = buildTranscriptTimeline(transcript);
+      transcriptSource = transcript.length > 0 ? "caption_track" : null;
+      const captionKeyPoints = extractVideoKeyPoints(transcript, 8);
+      if (captionKeyPoints.length > 0) {
+        keyPoints = [...captionKeyPoints, ...keyPoints];
+      }
+    }
+  } catch (error) {
+    console.warn(`YouTube caption fetch failed: ${error.message}`);
+  }
+
+  if (transcript.length === 0) {
+    try {
+      const transcribeResult = await transcribeVideo(candidate.url);
+      if (transcribeResult.success) {
+        transcript = transcribeResult.transcript || [];
+        timeline = transcribeResult.timeline || [];
+        transcriptSource = transcript.length > 0 ? "audio_transcription" : transcriptSource;
+        if (Array.isArray(transcribeResult.key_points) && transcribeResult.key_points.length > 0) {
+          keyPoints = [...transcribeResult.key_points, ...keyPoints];
+        }
+      }
+    } catch (error) {
+      console.warn(`YouTube video transcription failed: ${error.message}`);
+    }
+  }
+
+  const transcriptText = transcript
+    .map((cue) => {
+      const stamp = cue.time || cue.start || "00:00";
+      return `[${stamp}] ${cue.text || ""}`.trim();
+    })
+    .filter(Boolean)
+    .join("\n");
+  const markdown = [
+    `# ${parsed.title || candidate.title}`,
+    "",
+    parsed.author ? `Author: ${parsed.author}` : "",
+    parsed.published_at ? `Published At: ${parsed.published_at}` : "",
+    parsed.duration ? `Duration: ${parsed.duration}` : "",
+    "",
+    parsed.description || candidate.summary || ""
+  ].filter(Boolean).join("\n");
+
+  return {
+    source_id: candidate.id,
+    content_type: candidate.content_type || candidate.source_type,
+    source_type: candidate.source_type,
+    tool: "extract_video_intel",
+    title: parsed.title || candidate.title,
+    url: candidate.url,
+    author: parsed.author || candidate.author,
+    published_at: parsed.published_at || candidate.published_at,
+    duration: parsed.duration,
+    markdown,
+    transcript,
+    timeline,
+    key_points: keyPoints,
+    key_frames: [
+      parsed.description ? parsed.description.slice(0, 220) : parsed.title || candidate.title,
+      ...timeline.slice(0, 2).map((item) => item.summary)
+    ].filter(Boolean),
+    facts: extractNumericFacts(`${markdown}\n${transcriptText}`, candidate.id, "youtube_video"),
+    metadata: {
+      ...(candidate.metadata || {}),
+      preview_image: parsed.preview_image || candidate.metadata?.preview_image || null,
+      page_images: [parsed.preview_image].filter(Boolean),
+      transcript_source: transcriptSource,
+      caption_language: selectedTrack?.languageCode || null,
+      caption_name: readYouTubeTextNode(selectedTrack?.name) || null
+    }
+  };
+}
+
 function inferConnectorIdFromUrl(url) {
   const hostname = hostFromUrl(url);
+  if (/xinhuanet\.com$/.test(hostname) || /news\.cn$/.test(hostname)) return "xinhua";
+  if (/people\.com\.cn$/.test(hostname)) return "people";
+  if (/news\.cctv\.com$/.test(hostname) || /cctv\.com$/.test(hostname)) return "cctv_news";
+  if (/thepaper\.cn$/.test(hostname)) return "the_paper";
+  if (/caixin\.com$/.test(hostname)) return "caixin";
+  if (/jiemian\.com$/.test(hostname)) return "jiemian";
+  if (/reuters\.com$/.test(hostname)) return "reuters";
+  if (/apnews\.com$/.test(hostname)) return "ap_news";
+  if (/bbc\.com$/.test(hostname) || /bbc\.co\.uk$/.test(hostname)) return "bbc_news";
+  if (/bloomberg\.com$/.test(hostname)) return "bloomberg";
+  if (/nytimes\.com$/.test(hostname)) return "nytimes";
+  if (/wsj\.com$/.test(hostname)) return "wsj";
+  if (/planetebook\.com$/.test(hostname)) return "planetebook";
+  if (/google\.com$/.test(hostname) || /blog\.google$/.test(hostname) || /developers\.google\.com$/.test(hostname) || /ai\.google\.dev$/.test(hostname) || /cloud\.google\.com$/.test(hostname) || /support\.google\.com$/.test(hostname) || /research\.google$/.test(hostname)) return "google";
+  if (/github\.com$/.test(hostname)) return "github";
+  if (/reddit\.com$/.test(hostname)) return "reddit";
+  if (/wikipedia\.org$/.test(hostname)) return "wikipedia";
+  if (/zhihu\.com$/.test(hostname)) return "zhihu";
+  if (/stackoverflow\.com$/.test(hostname)) return "stack_overflow";
+  if (/youtube\.com$/.test(hostname) || /youtu\.be$/.test(hostname)) return "youtube";
   if (/bilibili\.com$/.test(hostname)) return "bilibili";
   if (/douyin\.com$/.test(hostname) || /iesdouyin\.com$/.test(hostname)) return "douyin";
   if (/ted\.com$/.test(hostname)) return "ted";
@@ -4143,10 +5854,10 @@ function inferConnectorIdFromUrl(url) {
 }
 
 function contentTypeForConnector(connectorId) {
-  if (connectorId === "bilibili" || connectorId === "douyin" || connectorId === "ted") {
+  if (connectorId === "bilibili" || connectorId === "douyin" || connectorId === "ted" || connectorId === "youtube") {
     return "video";
   }
-  if (connectorId === "segmentfault" || connectorId === "arxiv") {
+  if (connectorId === "segmentfault" || connectorId === "arxiv" || connectorId === "planetebook") {
     return "document";
   }
   if (connectorId === "hacker_news") {
@@ -4572,6 +6283,9 @@ module.exports = {
   searchRealSources,
   readCandidate,
   ToolRegistry,
+  registerGeneratedSiteConnector,
+  findConnectorByDomain,
+  getConnectorById,
   __internal: {
     buildQueryTokens,
     buildDouyinSearchUrl,
@@ -4582,6 +6296,12 @@ module.exports = {
     parseBilibiliSearchHtml,
     parseITHomeTagHtml,
     parseTedSearchHtml,
+    parseZhihuSearchHtml,
+    parseYouTubeSearchHtml,
+    extractYouTubePlayerResponse,
+    selectYouTubeCaptionTrack,
+    parseYouTubeCaptionJson3,
+    parseYouTubeCaptionXml,
     extractBilibiliState,
     resolveDiscoverConnectors,
     captureRenderedPage,
@@ -4589,16 +6309,13 @@ module.exports = {
     parseDouyinRenderedPageSafe,
     extractReaderMarkdown,
     stripTags,
+    inferConnectorIdFromUrl,
+    contentTypeForConnector,
     inferDocumentKindFromUrl,
-    parseDelimitedTable
+    parseDelimitedTable,
+    connectorSupportsDomain,
+    registerGeneratedSiteConnector,
+    findConnectorByDomain,
+    getConnectorById
   }
 };
-
-
-
-
-
-
-
-
-

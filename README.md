@@ -45,3 +45,20 @@ npm test
 ```
 
 测试会使用临时数据目录，避免污染仓库内的 `data/`。
+
+## LLM 配置
+
+- 项目会优先读取仓库根目录的 `.env.local` / `.env`
+- 如果未显式设置 `OPENAI_RESPONSES_URL` 和 `OPENAI_*_MODEL`，会尝试从 `~/.codex/config.toml` 推断
+- 建议把 `OPENAI_API_KEY` 放在 `.env.local`，不要提交到仓库
+
+```bash
+copy env.local.template .env.local
+npm run start:llm
+```
+
+也可以直接临时传入：
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/start-with-llm.ps1 -ApiKey "<new-key>" -Model "gpt-5.4"
+```

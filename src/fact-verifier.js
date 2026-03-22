@@ -1,8 +1,10 @@
 const { normalizeText, toIsoTimestamp } = require("./evidence-model");
-const { extractTextFromResponsePayload } = require("./openai-response");
+require("./project-env").initializeProjectEnv();
+const { extractTextFromResponsePayload, normalizeResponsesRequestBody, readResponsesApiPayload } = require("./openai-response");
 
 const OPENAI_RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 const DEFAULT_VERIFIER_MODEL = process.env.OPENAI_VERIFIER_MODEL || "gpt-4o-mini";
+const OPENAI_REQUEST_TIMEOUT_MS = Math.max(20000, Number(process.env.OPENSEARCH_OPENAI_TIMEOUT_MS || 90000));
 
 function unique(values) {
   return Array.from(new Set((values || []).filter(Boolean)));
@@ -356,8 +358,8 @@ async function requestVerificationReviewFromModel(evidenceUnits, heuristicVerifi
       "content-type": "application/json",
       authorization: `Bearer ${apiKey}`
     },
-    signal: AbortSignal.timeout(25000),
-    body: JSON.stringify({
+    signal: AbortSignal.timeout(OPENAI_REQUEST_TIMEOUT_MS),
+    body: JSON.stringify(normalizeResponsesRequestBody({
       model: DEFAULT_VERIFIER_MODEL,
       store: false,
       input: prompt,
@@ -369,12 +371,12 @@ async function requestVerificationReviewFromModel(evidenceUnits, heuristicVerifi
           schema
         }
       }
-    })
+    }, { forceStream: true }))
   });
 
-  const payload = await response.json();
+  const { rawText: responseText, payload } = await readResponsesApiPayload(response);
   if (!response.ok) {
-    throw new Error(payload?.error?.message || `OpenAI verifier failed with HTTP ${response.status}`);
+    throw new Error(payload?.error?.message || responseText.trim() || `OpenAI verifier failed with HTTP ${response.status}`);
   }
 
   const rawText = extractTextFromResponsePayload(payload);

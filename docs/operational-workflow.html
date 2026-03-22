@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenSearch Operational Workflow</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --text: #162033;
+      --muted: #51607a;
+      --border: #d8e0ec;
+    }
+    body {
+      margin: 0;
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .page {
+      max-width: 1800px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .header {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+    }
+    p, li {
+      line-height: 1.6;
+      color: var(--muted);
+    }
+    .diagram {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+      overflow: auto;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    }
+    .notes {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+      margin-top: 20px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px 18px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    }
+    .card h2 {
+      margin-top: 0;
+      font-size: 18px;
+    }
+  </style>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      securityLevel: 'loose',
+      theme: 'base',
+      flowchart: {
+        htmlLabels: true,
+        curve: 'basis'
+      },
+      themeVariables: {
+        primaryColor: '#e9f0ff',
+        primaryTextColor: '#14213d',
+        primaryBorderColor: '#4361ee',
+        lineColor: '#52627a',
+        secondaryColor: '#eef7f3',
+        tertiaryColor: '#fff7e9',
+        clusterBkg: '#f9fbff',
+        clusterBorder: '#bfd0ea',
+        fontFamily: 'Inter, Segoe UI, Arial, sans-serif'
+      }
+    });
+  </script>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <h1>OpenSearch Operational Workflow</h1>
+      <p>This browser view renders the system flowchart as SVG for scalable viewing, screenshotting, and presentation use.</p>
+      <p>Tip: open browser print dialog and choose “Save as PDF” for a high-resolution export.</p>
+    </div>
+
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TD
+    S([Start]) --> C[Client / UI / API Consumer&lt;br/&gt;Input: query or question, mode=deep]
+    C --> R{Which entry point?}
+
+    R -->|POST /api/search| A1[Search API Handler&lt;br/&gt;Validates request body&lt;br/&gt;Normalizes query -&gt; runResearch(question, mode)]
+    R -->|POST /api/research| A2[Research API Handler&lt;br/&gt;Validates question payload&lt;br/&gt;Calls runResearch(question, mode)]
+    R -->|GET /api/research/stream| A3[Streaming Handler&lt;br/&gt;SSE heartbeat + incremental progress events&lt;br/&gt;Calls runResearch(question, mode, onProgress)]
+    R -->|GET /api/search/capabilities| A4[Capabilities Handler&lt;br/&gt;Returns runtime modes, limits,&lt;br/&gt;source_capabilities incl. generated connectors]
+    R -->|Tool / memory APIs| A5[Operational Support APIs&lt;br/&gt;Samples, experience, audit, synthesize-tool,&lt;br/&gt;run-ephemeral-tool]
+
+    A1 --> P0
+    A2 --> P0
+    A3 --> P0
+
+    subgraph P[Planning and Runtime Setup]
+        P0[buildPlan(question)&lt;br/&gt;Input: user question] --> P1[buildLlmPlanningContext&lt;br/&gt;Collects source_capabilities, site hints,&lt;br/&gt;task goal, stop policy skeleton]
+        P1 --> P2[LLM Planner Request&lt;br/&gt;Returns sub_questions, initial_queries,&lt;br/&gt;chosen_connector_ids, site_search_strategies]
+        P2 --> P3[mergePlanWithModelSelection&lt;br/&gt;Strict validation + normalization&lt;br/&gt;Output: executable plan]
+        P3 --> P4[applyExecutionModeToPlan&lt;br/&gt;Attaches budgets and execution limits]
+        P4 --> P5[Initialize runtime state&lt;br/&gt;scratchpad + agent registry + agent runtime + knowledge graph + telemetry]
+    end
+
+    P5 --> G0{Plan contains site_search_strategies?}
+    G0 -->|No| L0[Emit initial plan progress event]
+
+    subgraph G[Generated Site Connector Provisioning]
+        G1[Iterate each site_search_strategy&lt;br/&gt;Input: domain, search_mode, query_variants] --> G2{Existing connector covers domain?}
+        G2 -->|Yes| G3[Reuse static or prior generated connector&lt;br/&gt;Set resolved_connector_id&lt;br/&gt;Mark provisioning_status=existing/reused]
+        G2 -->|No| G4[Normalize domain + build stable connector id&lt;br/&gt;Example: https://www.openai.com -&gt; site_openai_com]
+        G4 --> G5[Detect site search capability&lt;br/&gt;Homepage fetch + form parsing + common search URL probes]
+        G5 --> G6{Search capability validated?}
+        G6 -->|Yes| G7[Request formal tool creation via tool platform&lt;br/&gt;Requester=llm_orchestrator&lt;br/&gt;Generate search + read tools]
+        G6 -->|No| G8[Generate read-only connector draft&lt;br/&gt;Search disabled, read enabled]
+        G7 --> G9[Validate generated connector&lt;br/&gt;Read homepage; search verification query]
+        G8 --> G9
+        G9 --> G10{Read validation succeeded?}
+        G10 -->|No| G11[Provisioning failed&lt;br/&gt;Audit failure + downgrade to site_query fallback]
+        G10 -->|Yes| G12{Search validation succeeded?}
+        G12 -->|Yes| G13[Persist generated connector record&lt;br/&gt;Register connector + tools immediately&lt;br/&gt;Expose in source_capabilities]
+        G12 -->|No| G14[Persist read-only generated connector&lt;br/&gt;effective_search_mode=site_query_with_generated_read]
+    end
+
+    G0 -->|Yes| G1
+    G3 --> L0
+    G11 --> L0
+    G13 --> L0
+    G14 --> L0
+
+    L0 --> Q0[Seed activeConnectorIds + round state&lt;br/&gt;queries=plan.initial_queries]
+    Q0 --> LOOP{Round &lt;= stop_policy.max_rounds?}
+    LOOP -->|No| E8[If no evaluation yet, force stop evaluation]
+
+    subgraph D[Per-Round Discovery and Reading Loop]
+        D0[runRound(plan, question, queries)&lt;br/&gt;Record queries in scratchpad + timeline] --> D1[runWebResearcher(plan, queries, telemetry)]
+        D1 --> D2[Base discovery tasks&lt;br/&gt;For each query -&gt; invokeSourceTool(action=discover)&lt;br/&gt;connector_ids=plan.chosen_connector_ids]
+        D1 --> D3{Site strategy tasks available?}
+        D3 -->|Yes| D4[buildSiteStrategyTasks&lt;br/&gt;Modes:&lt;br/&gt;connector_search / site_query / hybrid / verify_only / site_query_with_generated_read]
+        D3 -->|No| D5[Fallback site-hint queries via bing_web + site:domain]
+        D4 --> D6[Execute strategy tasks&lt;br/&gt;connector search or bing_web site:domain]
+        D6 --> D7{Read-only generated connector attached?}
+        D7 -->|Yes| D8[Rewrite discovered candidates&lt;br/&gt;candidate.connector = generated read connector]
+        D7 -->|No| D9[Keep discovered candidate connector]
+        D2 --> D10[Aggregate candidate reports]
+        D5 --> D10
+        D8 --> D10
+        D9 --> D10
+        D10 --> D11[Deduplicate + score candidates&lt;br/&gt;Preferred domain boosts + telemetry failures]
+        D11 --> D12[LLM candidate routing&lt;br/&gt;Select best candidates + assign agent + preferred tool]
+        D12 --> D13[runSpecialistReads(selected)]
+        D13 --> D14[Agent groups&lt;br/&gt;long_text_collector / video_parser / chart_parser / fact_verifier]
+        D14 --> D15[Tool resolution via ToolRegistry / AgentSystem&lt;br/&gt;Primary tool + fallback tool chain]
+        D15 --> D16{Read/tool execution succeeded?}
+        D16 -->|Yes| D17[Normalize reads + createEvidenceUnit&lt;br/&gt;Update scratchpad artifacts and handoffs]
+        D16 -->|No| D18{Ephemeral fallback allowed?}
+        D18 -->|Yes| D19[Attempt ephemeral fallback&lt;br/&gt;Legacy synthesizeTool / runEphemeralTool path&lt;br/&gt;Validate + record tool outcome]
+        D18 -->|No| D20[Record read failure in telemetry]
+        D19 --> D21{Fallback produced usable read?}
+        D21 -->|Yes| D17
+        D21 -->|No| D20
+    end
+
+    LOOP -->|Yes| D0
+    D17 --> E0[Collect round outputs&lt;br/&gt;candidates, reads, evidence_items, executed_search_tasks]
+    D20 --> E0
+
+    subgraph E[Evaluation, Verification, and Stopping]
+        E0 --> E1[crossCheckFacts + runFactVerifierReview&lt;br/&gt;Compare claims, confirmations, conflicts, coverage gaps]
+        E1 --> E2[runStopEvaluation&lt;br/&gt;LLM stop controller evaluates sufficiency,&lt;br/&gt;missing questions, follow-up queries, connector suggestions]
+        E2 --> E3{Stop decision = continue_search?}
+        E3 -->|Yes| E4[buildFollowUpQueries&lt;br/&gt;Use evaluator suggestions + coverage gaps]
+        E4 --> E5[buildNextRoundConnectorIds&lt;br/&gt;Drop unhealthy connectors, add suggested healthy reserves]
+        E5 --> E6[Update connector health snapshot + next queries]
+        E6 --> LOOP
+        E3 -->|No| E7[Finalize evaluation + stop_reason]
+    end
+
+    E7 --> F0
+    E8 --> F0
+
+    subgraph F[Final Synthesis and Persistence]
+        F0[synthesize(question, mode, evidence, verification, evaluation)&lt;br/&gt;LLM answer composer creates quick_answer,&lt;br/&gt;conclusion, claims, confidence, uncertainty] --> F1[Build final response payload&lt;br/&gt;sources + claims + deep_research_summary + rounds + telemetry]
+        F1 --> F2[Persist memory and state&lt;br/&gt;experience-memory.json&lt;br/&gt;knowledge-graph.json&lt;br/&gt;tool-platform memory/audit]
+        F2 --> F3{Original endpoint type?}
+        F3 -->|/api/search| F4[Return normalized search response]
+        F3 -->|/api/research| F5[Return full research payload]
+        F3 -->|/api/research/stream| F6[Emit SSE done event + normalized result]
+    end
+
+    F4 --> Z([End])
+    F5 --> Z
+    F6 --> Z
+
+    subgraph DS[Persistent Data Stores and Shared Runtime Artifacts]
+        M1[(generated-site-connectors.json&lt;br/&gt;Persistent generated connector registry)]
+        M2[(experience-memory.json&lt;br/&gt;Reusable query / connector lessons)]
+        M3[(knowledge-graph.json&lt;br/&gt;Graph of claims and evidence)]
+        M4[(tool-platform-memory.json&lt;br/&gt;Tool versions, promotion, reuse)]
+        M5[(tool-platform-audit.jsonl&lt;br/&gt;Execution and provisioning audit trail)]
+        M6[(source_capabilities&lt;br/&gt;Static + generated connectors exposed to planner and API)]
+    end
+
+    G13 -.writes.-> M1
+    G14 -.writes.-> M1
+    G11 -.audits.-> M5
+    G3 -.updates visibility.-> M6
+    G13 -.updates visibility.-> M6
+    G14 -.updates visibility.-> M6
+    P1 -.reads.-> M6
+    F2 -.writes.-> M2
+    F2 -.writes.-> M3
+    D19 -.records.-> M4
+    D19 -.audits.-> M5
+      </pre>
+    </div>
+
+    <div class="notes">
+      <div class="card">
+        <h2>Audience Fit</h2>
+        <p>The top-to-bottom structure follows the live request path, while grouped subgraphs explain planning, provisioning, execution, and persistence in plain language.</p>
+      </div>
+      <div class="card">
+        <h2>How to Export</h2>
+        <p>Because Mermaid renders to SVG, zoom remains crisp. Use browser print-to-PDF or screenshot at any scale for presentations and documentation.</p>
+      </div>
+      <div class="card">
+        <h2>What It Highlights</h2>
+        <p>The diagram explicitly shows conditional branches for site connector generation, read-only degradation, fallback search, evaluator-driven looping, and final persistence.</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

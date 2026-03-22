@@ -82,7 +82,17 @@ function pushRuntimeMessage(runtime, message) {
   return entry;
 }
 
-function dispatchAgentTask(runtime, { from = "llm_orchestrator", agentId, taskType, input = null, metadata = {} }) {
+function dispatchAgentTask(runtime, {
+  from = "llm_orchestrator",
+  agentId,
+  taskType,
+  input = null,
+  metadata = {},
+  priority = "normal",
+  attempt = 1,
+  budgetTag = null,
+  timeoutMs = null
+}) {
   if (!runtime?.agents?.[agentId]) {
     throw new Error(`Unknown runtime agent: ${agentId}`);
   }
@@ -94,6 +104,10 @@ function dispatchAgentTask(runtime, { from = "llm_orchestrator", agentId, taskTy
     from,
     task_type: taskType,
     status: "running",
+    priority,
+    attempt: Math.max(1, Number(attempt) || 1),
+    budget_tag: budgetTag || null,
+    timeout_ms: Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : null,
     input,
     metadata,
     created_at: now,
@@ -114,7 +128,11 @@ function dispatchAgentTask(runtime, { from = "llm_orchestrator", agentId, taskTy
     to: agentId,
     task_id: task.id,
     task_type: taskType,
-    metadata
+    metadata,
+    priority: task.priority,
+    attempt: task.attempt,
+    budget_tag: task.budget_tag,
+    timeout_ms: task.timeout_ms
   });
 
   return task;
@@ -190,6 +208,10 @@ function getAgentRuntimeSnapshot(runtime) {
       agent_id: task.agent_id,
       from: task.from,
       task_type: task.task_type,
+      priority: task.priority,
+      attempt: task.attempt,
+      budget_tag: task.budget_tag,
+      timeout_ms: task.timeout_ms,
       status: task.status,
       created_at: task.created_at,
       updated_at: task.updated_at,

@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
+    "start:llm": "powershell -ExecutionPolicy Bypass -File scripts/start-with-llm.ps1",
     "test": "node scripts/run-node-tests.js"
   }
 }

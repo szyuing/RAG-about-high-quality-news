@@ -97,6 +97,23 @@ test("POST /api/research should reject missing question with 400", async () => {
   });
 });
 
+test("POST /api/research should reject quick mode", async () => {
+  await withServer(async (server) => {
+    const response = await request(server, {
+      path: "/api/research",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ question: "demo question", mode: "quick" })
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json.error, "invalid_request");
+    assert.match(response.json.message, /mode must be deep/);
+  });
+});
+
 test("POST /api/research should return response schema version on success", async () => {
   const server = createServer({
     runResearch: async () => ({
@@ -127,6 +144,52 @@ test("POST /api/research should return response schema version on success", asyn
     assert.equal(response.statusCode, 200);
     assert.equal(response.json.response_schema_version, "research_response.v1");
     assert.equal(response.json.task_id, "task_demo");
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    }));
+  }
+});
+
+test("POST /api/research should serialize circular payloads safely", async () => {
+  const circular = {};
+  circular.self = circular;
+
+  const server = createServer({
+    runResearch: async () => ({
+      task_id: "task_circular",
+      telemetry: circular
+    }),
+    getSamples: () => [],
+    getExperienceMemory: () => [],
+    summarizeExperienceMemory: () => ({ schema_version: "experience-overview.v1", total_entries: 0 }),
+    getToolMemory: () => ({}),
+    getToolAuditLog: () => [],
+    getSourceCapabilities: () => [],
+    synthesizeTool: async () => ({ id: "tool-1" }),
+    runEphemeralTool: async () => ({ success: true })
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const response = await request(server, {
+      path: "/api/research",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ question: "demo question", mode: "deep" })
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json.response_schema_version, "research_response.v1");
+    assert.equal(response.json.task_id, "task_circular");
+    assert.ok(response.json.telemetry);
+    assert.equal(response.json.telemetry.self, undefined);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => {
       if (error) {
@@ -222,34 +285,8 @@ test("POST /api/search should return normalized answer with citations", async ()
   }
 });
 
-test("POST /api/search should map speed profile to quick mode", async () => {
-  let callInput = null;
-  const server = createServer({
-    runResearch: async (input) => {
-      callInput = input;
-      return {
-        task_id: "task_profile",
-        plan: { site_search_strategies: [] },
-        rounds: [],
-        evidence: [],
-        evaluation: { evaluator_mode: "fallback", stop_state: null },
-        final_answer: {
-          quick_answer: "profile answer",
-          deep_research_summary: { conclusion: "", confidence: null, uncertainty: [] }
-        }
-      };
-    },
-    getSamples: () => [],
-    getExperienceMemory: () => [],
-    getToolMemory: () => ({}),
-    getToolAuditLog: () => [],
-    getSourceCapabilities: () => [],
-    synthesizeTool: async () => ({ id: "tool-1" }),
-    runEphemeralTool: async () => ({ success: true })
-  });
-
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  try {
+test("POST /api/search should reject non-quality search_profile", async () => {
+  await withServer(async (server) => {
     const response = await request(server, {
       path: "/api/search",
       method: "POST",
@@ -259,22 +296,27 @@ test("POST /api/search should map speed profile to quick mode", async () => {
       body: JSON.stringify({ query: "fast query", search_profile: "speed" })
     });
 
-    assert.equal(response.statusCode, 200);
-    assert.equal(response.json.response_schema_version, "search_response.v1");
-    assert.equal(callInput.question, "fast query");
-    assert.equal(callInput.mode, "quick");
-    assert.equal(response.json.mode, "quick");
-    assert.equal(response.json.search_profile, "speed");
-    assert.equal(response.json.diagnostics.mode_source, "search_profile");
-  } finally {
-    await new Promise((resolve, reject) => server.close((error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve();
-    }));
-  }
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json.error, "invalid_request");
+    assert.match(response.json.message, /search_profile must be quality/);
+  });
+});
+
+test("POST /api/search should reject quick mode", async () => {
+  await withServer(async (server) => {
+    const response = await request(server, {
+      path: "/api/search",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ query: "fast query", mode: "quick" })
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json.error, "invalid_request");
+    assert.match(response.json.message, /mode must be deep/);
+  });
 });
 
 test("POST /api/search should reject missing query with 400", async () => {
@@ -363,11 +405,11 @@ test("GET /api/search/capabilities should return supported modes and connectors"
 
     assert.equal(response.statusCode, 200);
     assert.equal(response.json.schema_version, "search-capabilities.v1");
-    assert.deepEqual(response.json.modes, ["quick", "deep"]);
+    assert.deepEqual(response.json.modes, ["deep"]);
     assert.equal(response.json.default_mode, "deep");
-    assert.deepEqual(response.json.search_profiles.values, ["speed", "balanced", "quality"]);
+    assert.deepEqual(response.json.search_profiles.values, ["quality"]);
     assert.equal(response.json.search_profiles.default, "quality");
-    assert.equal(response.json.search_profiles.mode_mapping.speed, "quick");
+    assert.equal(response.json.search_profiles.mode_mapping.quality, "deep");
     assert.equal(response.json.limits.max_citations, 10);
     assert.equal(response.json.source_capabilities[0].id, "bing_web");
   } finally {

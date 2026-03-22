@@ -1,1 +1,887 @@
-[]
+[
+  {
+    "created_at": "2026-03-18T05:11:40.874Z",
+    "last_seen_at": "2026-03-18T09:23:31.870Z",
+    "question": "甄嬛传的最后一句话是什么",
+    "question_key": "甄嬛传的最后一句话是什么",
+    "run_count": 6,
+    "success_count": 1,
+    "useful_queries": [
+      "甄嬛传 最后一句话",
+      "甄嬛传 大结局 最后一句台词",
+      "后宫甄嬛传 最后一集 台词",
+      "甄嬛传 76集 结尾 台词",
+      "甄嬛传 片尾 最后一句 甄嬛传",
+      "甄嬛传 最后一集 台词 最后一句"
+    ],
+    "useful_source_types": [
+      "web",
+      "document",
+      "video"
+    ],
+    "useful_platforms": [
+      "web (6 sources)",
+      "document (4 sources)",
+      "video (1 sources)",
+      "web (9 sources)",
+      "web (2 sources)"
+    ],
+    "effective_search_terms": [
+      "甄嬛传 最后一句话 (2 times)",
+      "甄嬛传 大结局 最后一句台词 (1 times)",
+      "后宫甄嬛传 最后一集 台词 (1 times)",
+      "甄嬛传 最后一集 台词 最后一句 (1 times)",
+      "甄嬛传 最后一句话 (1 times)",
+      "甄嬛传的最后一句话是什么 (1 times)"
+    ],
+    "primary_source_sites": [
+      "田馥甄和周杰伦在一起过吗? - 知乎 (2 times)",
+      "甄姬被赐死的具体原因是什么？ - 知乎 (1 times)",
+      "《甄嬛传》甄嬛明明不想入宫，为什么殿选时却以「嬛嬛一袅 ... (1 times)",
+      "甄姬被赐死的具体原因是什么？ - 知乎 (2 times)",
+      "document:ec20cd86bf81::text::1-1 (1 times)",
+      "web:0c6d26049df9 (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "bing_web",
+        "segmentfault",
+        "bilibili",
+        "hacker_news"
+      ],
+      "avoided_connector_ids": [
+        "bing_web"
+      ],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 4,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [
+      "no candidate returned"
+    ],
+    "metrics": {
+      "quality_score": 0.46,
+      "confidence": 0.61,
+      "sufficiency": true,
+      "rounds_completed": 2,
+      "sources_read": 13,
+      "evidence_items": 0,
+      "confirmations": 6,
+      "conflicts": 1,
+      "coverage_gaps": 13,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 3
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.4",
+      "mode": "llm",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T08:19:53.407Z",
+    "last_seen_at": "2026-03-18T08:24:15.371Z",
+    "question": "test",
+    "question_key": "test",
+    "run_count": 3,
+    "success_count": 0,
+    "useful_queries": [
+      "test",
+      "\"test\" official",
+      "\"test\" definition",
+      "\"test\" site:org OR site:gov",
+      "\"test\" introduction",
+      "\"test\" site:gov OR site:org"
+    ],
+    "useful_source_types": [
+      "web",
+      "forum"
+    ],
+    "useful_platforms": [
+      "forum (4 sources)",
+      "web (2 sources)",
+      "web (3 sources)",
+      "forum (3 sources)",
+      "web (1 sources)",
+      "forum (1 sources)"
+    ],
+    "effective_search_terms": [
+      "test (1 times)",
+      "\"test\" official (1 times)",
+      "\"test\" definition (1 times)",
+      "\"test\" site:gov OR site:org (1 times)"
+    ],
+    "primary_source_sites": [
+      "web:1244be48e69f (1 times)",
+      "web:8e86f3b6e607 (1 times)",
+      "forum:32ca11d6ea1b (1 times)",
+      "web:ca1266d9c055 (1 times)",
+      "web:dcdce7592c14 (1 times)",
+      "Overview of Testing for SARS-CoV-2 | COVID-19 | CDC (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "bing_web",
+        "hacker_news"
+      ],
+      "avoided_connector_ids": [],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [],
+    "metrics": {
+      "quality_score": 0.82,
+      "confidence": 0.97,
+      "sufficiency": false,
+      "rounds_completed": 1,
+      "sources_read": 6,
+      "evidence_items": 0,
+      "confirmations": 1,
+      "conflicts": 1,
+      "coverage_gaps": 18,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.4",
+      "mode": "llm",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T08:17:36.847Z",
+    "last_seen_at": "2026-03-18T08:21:12.304Z",
+    "question": "甄嬛传最后一句话是什么",
+    "question_key": "甄嬛传最后一句话是什么",
+    "run_count": 2,
+    "success_count": 0,
+    "useful_queries": [
+      "甄嬛传 最后一句话 是什么",
+      "甄嬛传 大结局 最后一 句 台词",
+      "甄嬛传 76集 结尾 台词",
+      "site:bilibili.com 甄嬛传 大结局 最后一句话",
+      "甄嬛传 片尾 前 最后一句 台词",
+      "甄嬛传 最后一句话"
+    ],
+    "useful_source_types": [
+      "web",
+      "document",
+      "video"
+    ],
+    "useful_platforms": [
+      "web (10 sources)",
+      "document (4 sources)",
+      "web (9 sources)",
+      "video (1 sources)"
+    ],
+    "effective_search_terms": [
+      "甄嬛传 最后一句话 是什么 (1 times)",
+      "甄嬛传 大结局 最后一 句 台词 (1 times)",
+      "甄嬛传 76集 结尾 台词 (1 times)",
+      "甄嬛传 最后一句话 (1 times)",
+      "甄嬛传 大结局 最后一句 台词 (1 times)",
+      "后宫甄嬛传 76集 结尾 台词 (1 times)"
+    ],
+    "primary_source_sites": [
+      "web:0c6d26049df9 (2 times)",
+      "web:deaf058e274a (2 times)",
+      "web:11ee45c7fa8f (2 times)",
+      "web:a60ca98b2ec4 (1 times)",
+      "4399有哪些好玩的游戏？ - 知乎 (1 times)",
+      "有哪些很爽的后宫番吗？ - 知乎 (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "bing_web",
+        "segmentfault",
+        "bilibili"
+      ],
+      "avoided_connector_ids": [],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [],
+    "metrics": {
+      "quality_score": 0.38,
+      "confidence": 0.6,
+      "sufficiency": false,
+      "rounds_completed": 2,
+      "sources_read": 14,
+      "evidence_items": 0,
+      "confirmations": 6,
+      "conflicts": 2,
+      "coverage_gaps": 19,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.4",
+      "mode": "llm",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "甄嬛传最后一句话是什么",
+      "merge_rationale": ""
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T07:59:11.312Z",
+    "last_seen_at": "2026-03-18T07:59:11.312Z",
+    "question": "??? ?? ?????? ???????????",
+    "question_key": "",
+    "run_count": 1,
+    "success_count": 0,
+    "useful_queries": [
+      "??? ?? ?????? ???????????",
+      "\"????????????\" 官方"
+    ],
+    "useful_source_types": [
+      "web"
+    ],
+    "useful_platforms": [
+      "web (2 sources)"
+    ],
+    "effective_search_terms": [
+      "??? ?? ?????? ??????????? (1 times)",
+      "\"????????????\" 官方 (1 times)"
+    ],
+    "primary_source_sites": [
+      "web:d530655d27c4 (1 times)",
+      "web:9b32af72e7a9 (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "bing_web"
+      ],
+      "avoided_connector_ids": [],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [],
+    "metrics": {
+      "quality_score": 0.6,
+      "confidence": 0.75,
+      "sufficiency": false,
+      "rounds_completed": 1,
+      "sources_read": 2,
+      "evidence_items": 0,
+      "confirmations": 0,
+      "conflicts": 0,
+      "coverage_gaps": 5,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.4",
+      "mode": "skipped_quick",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T07:56:15.167Z",
+    "last_seen_at": "2026-03-18T07:56:15.167Z",
+    "question": "????????????",
+    "question_key": "",
+    "run_count": 1,
+    "success_count": 0,
+    "useful_queries": [
+      "\"????????????\"",
+      "\"????????????\" 官方"
+    ],
+    "useful_source_types": [
+      "web"
+    ],
+    "useful_platforms": [
+      "web (2 sources)"
+    ],
+    "effective_search_terms": [
+      "\"????????????\" (1 times)",
+      "\"????????????\" 官方 (1 times)"
+    ],
+    "primary_source_sites": [
+      "web:9b32af72e7a9 (1 times)",
+      "web:c65ae9f6105a (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "bing_web"
+      ],
+      "avoided_connector_ids": [],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [],
+    "metrics": {
+      "quality_score": 0.62,
+      "confidence": 0.75,
+      "sufficiency": false,
+      "rounds_completed": 1,
+      "sources_read": 2,
+      "evidence_items": 0,
+      "confirmations": 0,
+      "conflicts": 0,
+      "coverage_gaps": 4,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.4",
+      "mode": "skipped_quick",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T05:46:49.506Z",
+    "last_seen_at": "2026-03-18T05:46:49.506Z",
+    "question": "????????????",
+    "question_key": "",
+    "run_count": 1,
+    "success_count": 0,
+    "useful_queries": [
+      "????????????",
+      "\"????????????\" 官方"
+    ],
+    "useful_source_types": [
+      "web"
+    ],
+    "useful_platforms": [
+      "web (2 sources)"
+    ],
+    "effective_search_terms": [
+      "???????????? (1 times)",
+      "\"????????????\" 官方 (1 times)"
+    ],
+    "primary_source_sites": [
+      "web:9b32af72e7a9 (1 times)",
+      "web:c65ae9f6105a (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "bing_web"
+      ],
+      "avoided_connector_ids": [],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [],
+    "metrics": {
+      "quality_score": 0.62,
+      "confidence": 0.75,
+      "sufficiency": false,
+      "rounds_completed": 1,
+      "sources_read": 2,
+      "evidence_items": 0,
+      "confirmations": 0,
+      "conflicts": 0,
+      "coverage_gaps": 4,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.4",
+      "mode": "skipped_quick",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T05:40:07.347Z",
+    "last_seen_at": "2026-03-18T05:40:07.347Z",
+    "question": "????????????",
+    "question_key": "",
+    "run_count": 1,
+    "success_count": 0,
+    "useful_queries": [
+      "\"????????????\"",
+      "\"????????????\" 官方"
+    ],
+    "useful_source_types": [
+      "web"
+    ],
+    "useful_platforms": [
+      "web (2 sources)"
+    ],
+    "effective_search_terms": [
+      "\"????????????\" (1 times)",
+      "\"????????????\" 官方 (1 times)"
+    ],
+    "primary_source_sites": [
+      "web:9b32af72e7a9 (1 times)",
+      "web:c65ae9f6105a (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "bing_web"
+      ],
+      "avoided_connector_ids": [],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [],
+    "metrics": {
+      "quality_score": 0.62,
+      "confidence": 0.75,
+      "sufficiency": false,
+      "rounds_completed": 1,
+      "sources_read": 2,
+      "evidence_items": 0,
+      "confirmations": 0,
+      "conflicts": 0,
+      "coverage_gaps": 4,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.4",
+      "mode": "skipped_quick",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T05:37:39.789Z",
+    "last_seen_at": "2026-03-18T05:37:39.789Z",
+    "question": "????????????",
+    "question_key": "",
+    "run_count": 1,
+    "success_count": 0,
+    "useful_queries": [
+      "????????????"
+    ],
+    "useful_source_types": [
+      "forum"
+    ],
+    "useful_platforms": [
+      "forum (2 sources)"
+    ],
+    "effective_search_terms": [
+      "???????????? (1 times)"
+    ],
+    "primary_source_sites": [
+      "forum:5ab47312a3dc (1 times)",
+      "forum:929f10cb37ef (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "hacker_news"
+      ],
+      "avoided_connector_ids": [],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [],
+    "metrics": {
+      "quality_score": 0.62,
+      "confidence": 0.75,
+      "sufficiency": false,
+      "rounds_completed": 1,
+      "sources_read": 2,
+      "evidence_items": 0,
+      "confirmations": 1,
+      "conflicts": 0,
+      "coverage_gaps": 4,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.1-codex-mini",
+      "mode": "skipped_quick",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T05:30:22.057Z",
+    "last_seen_at": "2026-03-18T05:30:22.057Z",
+    "question": "????????????",
+    "question_key": "",
+    "run_count": 1,
+    "success_count": 0,
+    "useful_queries": [
+      "????????????"
+    ],
+    "useful_source_types": [
+      "forum"
+    ],
+    "useful_platforms": [
+      "forum (2 sources)"
+    ],
+    "effective_search_terms": [
+      "???????????? (1 times)"
+    ],
+    "primary_source_sites": [
+      "forum:5ab47312a3dc (1 times)",
+      "forum:929f10cb37ef (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "hacker_news"
+      ],
+      "avoided_connector_ids": [],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [],
+    "metrics": {
+      "quality_score": 0.62,
+      "confidence": 0.75,
+      "sufficiency": false,
+      "rounds_completed": 1,
+      "sources_read": 2,
+      "evidence_items": 0,
+      "confirmations": 1,
+      "conflicts": 0,
+      "coverage_gaps": 4,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.1-codex-mini",
+      "mode": "skipped_quick",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T05:27:22.621Z",
+    "last_seen_at": "2026-03-18T05:30:00.123Z",
+    "question": "OpenAI Sora current generation limits",
+    "question_key": "openai sora current generation limits",
+    "run_count": 2,
+    "success_count": 1,
+    "useful_queries": [
+      "OpenAI Sora current generation limits",
+      "OpenAI Sora official overview"
+    ],
+    "useful_source_types": [
+      "web"
+    ],
+    "useful_platforms": [
+      "web (2 sources)"
+    ],
+    "effective_search_terms": [
+      "OpenAI Sora current generation limits (1 times)",
+      "OpenAI Sora official overview (1 times)"
+    ],
+    "primary_source_sites": [
+      "web:392ef57aa2dc (1 times)",
+      "web:4e82fb7b5164 (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "bing_web",
+        "hacker_news"
+      ],
+      "avoided_connector_ids": [
+        "bing_web"
+      ],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [],
+    "metrics": {
+      "quality_score": 0.53,
+      "confidence": 0.6,
+      "sufficiency": true,
+      "rounds_completed": 1,
+      "sources_read": 2,
+      "evidence_items": 0,
+      "confirmations": 0,
+      "conflicts": 0,
+      "coverage_gaps": 7,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.1-codex-mini",
+      "mode": "skipped_quick",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T03:41:49.339Z",
+    "last_seen_at": "2026-03-18T03:55:03.376Z",
+    "question": "OpenAI Sora 当前生成限制是什么？",
+    "question_key": "openai sora 当前生成限制是什么",
+    "run_count": 3,
+    "success_count": 0,
+    "useful_queries": [
+      "OpenAI Sora 当前生成限制是什么？",
+      "OpenAI Sora official help center generation limits duration resolution aspect ratio",
+      "site:openai.com Sora help center video generation limits Plus Pro duration resolution",
+      "OpenAI Sora official help center generation limits duration resolution",
+      "site:openai.com Sora help center duration resolution aspect ratio video limits"
+    ],
+    "useful_source_types": [
+      "web"
+    ],
+    "useful_platforms": [
+      "web (2 sources)"
+    ],
+    "effective_search_terms": [
+      "OpenAI Sora 当前生成限制是什么？ (1 times)",
+      "OpenAI Sora official help center generation limits duration resolution aspect ratio (1 times)",
+      "site:openai.com Sora help center video generation limits Plus Pro duration resolution (1 times)",
+      "OpenAI Sora official help center generation limits duration resolution (1 times)",
+      "site:openai.com Sora help center duration resolution aspect ratio video limits (1 times)"
+    ],
+    "primary_source_sites": [
+      "OpenAI 放王炸，将发布整合多项技术的 GPT-5，并免费无限 ... (1 times)",
+      "个人怎么才能使用OpenAI? - 知乎 (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "bing_web",
+        "hacker_news"
+      ],
+      "avoided_connector_ids": [],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [
+      "no candidate returned"
+    ],
+    "metrics": {
+      "quality_score": 0.42,
+      "confidence": 0.47,
+      "sufficiency": false,
+      "rounds_completed": 1,
+      "sources_read": 2,
+      "evidence_items": 0,
+      "confirmations": 0,
+      "conflicts": 0,
+      "coverage_gaps": 6,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.4",
+      "mode": "skipped_quick",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  },
+  {
+    "created_at": "2026-03-18T03:27:59.074Z",
+    "last_seen_at": "2026-03-18T03:43:23.676Z",
+    "question": "OpenAI Sora ??????????",
+    "question_key": "openai sora",
+    "run_count": 6,
+    "success_count": 0,
+    "useful_queries": [
+      "OpenAI Sora official overview",
+      "site:openai.com Sora help center limits duration resolution availability",
+      "site:openai.com Sora help center video generation limits duration resolution",
+      "site:openai.com Sora help center limits resolution duration",
+      "OpenAI Sora official generation limits duration resolution aspect ratio",
+      "site:openai.com Sora help center video generation limits"
+    ],
+    "useful_source_types": [
+      "forum"
+    ],
+    "useful_platforms": [
+      "forum (4 sources)"
+    ],
+    "effective_search_terms": [
+      "OpenAI Sora official overview (1 times)",
+      "site:openai.com Sora help center limits duration resolution availability (1 times)",
+      "site:openai.com Sora help center video generation limits duration resolution (1 times)",
+      "site:openai.com Sora help center limits resolution duration (1 times)",
+      "OpenAI Sora official generation limits duration resolution aspect ratio (1 times)",
+      "site:openai.com Sora help center video generation limits (1 times)"
+    ],
+    "primary_source_sites": [
+      "forum:df8a4c4269b2 (1 times)",
+      "forum:1e42356eb738 (1 times)",
+      "forum:03a673288224 (1 times)"
+    ],
+    "efficient_tool_combinations": [],
+    "learned_patterns": {
+      "boosted_connector_ids": [
+        "bing_web",
+        "hacker_news"
+      ],
+      "avoided_connector_ids": [],
+      "follow_up_queries": [],
+      "promoted_sites": []
+    },
+    "ephemeral_tool_insights": {
+      "attempts": 0,
+      "recovered_sources": [],
+      "promote_candidates": []
+    },
+    "noisy_paths": [
+      "no candidate returned"
+    ],
+    "metrics": {
+      "quality_score": 0.28,
+      "confidence": 0.32,
+      "sufficiency": false,
+      "rounds_completed": 1,
+      "sources_read": 4,
+      "evidence_items": 0,
+      "confirmations": 2,
+      "conflicts": 0,
+      "coverage_gaps": 8,
+      "successful_ephemeral_tools": 0,
+      "failed_ephemeral_tools": 0
+    },
+    "note": "This question still exposes connector or evidence-model gaps that should be improved.",
+    "llm_memory": {
+      "model": "gpt-5.4",
+      "mode": "skipped_quick",
+      "fallback_reason": "",
+      "reusable_insights": [],
+      "retrieval_tags": [],
+      "merge_target_question_key": "openai sora",
+      "merge_rationale": "Quick mode skips memory synthesis to reduce latency."
+    },
+    "pinned": false,
+    "pinned_at": null,
+    "pin_note": ""
+  }
+]

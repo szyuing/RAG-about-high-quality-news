@@ -14,8 +14,8 @@ Unified search-answer endpoint with normalized citations.
 ```
 
 - `query` or `question`: required (either one)
-- `search_profile`: optional, one of `speed | balanced | quality` (default: `quality`)
-- `mode`: optional legacy field `quick | deep` (backward compatible, takes precedence over `search_profile` when both are provided)
+- `search_profile`: optional, only `quality` is supported (default: `quality`)
+- `mode`: optional, only `deep` is supported (default: `deep`)
 
 ### Response
 
@@ -63,21 +63,19 @@ Unified search-answer endpoint with normalized citations.
 
 ## GET `/api/search/capabilities`
 
-Returns supported modes, search profiles, limits, and source capabilities.
+Returns supported mode, search profile, limits, and source capabilities.
 
 ### Response
 
 ```json
 {
   "schema_version": "search-capabilities.v1",
-  "modes": ["quick", "deep"],
+  "modes": ["deep"],
   "default_mode": "deep",
   "search_profiles": {
-    "values": ["speed", "balanced", "quality"],
+    "values": ["quality"],
     "default": "quality",
     "mode_mapping": {
-      "speed": "quick",
-      "balanced": "deep",
       "quality": "deep"
     }
   },

@@ -3,7 +3,7 @@ const path = require("path");
 const zlib = require("zlib");
 
 const DEFAULT_SITE_HINT_FILENAMES = [
-  "信息采集网站专用表格.xlsx",
+  "濞ｅ洠鍓濇导鍛存煂閸ヮ剚鑲犵紓鍐╁灩閻濐垱绋夐幘鑸垫殢閻炴稏鍔嶉悧?xlsx",
   "site-hints.xlsx",
   "site-hints.json",
   "site-hints.csv",
@@ -11,11 +11,11 @@ const DEFAULT_SITE_HINT_FILENAMES = [
 ];
 
 const HEADER_PATTERNS = {
-  name: /网站|站点|平台|名称|名字|媒体|来源|source|site|name/i,
-  domain: /域名|网址|链接|地址|官网|首页|url|domain|host/i,
-  category: /分类|类型|领域|行业|赛道|主题|topic|category|type/i,
-  tags: /标签|关键词|关键字|适用|内容|说明|备注|描述|notes?|tags?|keywords?|desc/i,
-  priority: /优先|推荐|重要|权重|等级|星级|quality|priority|score|rank/i
+  name: /缂傚啯鍨归悵鐦勭紒鏃€鐟ч崑顥傛鐐插暱瑜扮！闁告艾绉惰ⅷ|闁告艾绉撮悺顫傚┑顖涘笂缂嶅闁哄鍎茬花鐣杝ource|site|name/i,
+  domain: /闁糕晝鍠庨幃鏅愮紓鍐╁灥濞煎剟闂佸墽鍋撶敮纾￠柛锔芥緲濞煎剟閻庤顭囩紞澧婂Λ锝嗙墵閵嗗url|domain|host/i,
+  category: /闁告帒妫涚悮鐝呯紒顐ヮ嚙閻庣│濡澘妫楅悡妾ら悶娑樺缁楃劜閻犙勭洴娴滅窏濞戞挸顭烽。绲磘opic|category|type/i,
+  tags: /闁哄秴娲ㄩ绌﹂柛蹇斿▕閺侇厾鎷犲畡楣冨礂閹惰姤鏆涢悗娑欌拲闂侇偄鍊婚弫顦㈤柛鎰噹椤旀伔閻犲洤鐡ㄥΣ鎲掑璺烘处閺佺€ㄩ柟璇茬箺閸崋notes?|tags?|keywords?|desc/i,
+  priority: /濞村吋锚閸樻硲闁规亽鍔忓畷姒洪梺鎻掔Х椤╊洟闁哄鍟撮崳绔辩紒娑橆槺妤犲櫉闁哄嫮鍠撴鍣焣uality|priority|score|rank/i
 };
 
 let siteHintCache = {
@@ -218,9 +218,15 @@ function readZipEntries(buffer) {
 
 function parseWorkbookSheets(workbookXml, relsXml) {
   const relMap = new Map();
-  for (const match of relsXml.matchAll(/<Relationship[^>]*Id="([^"]+)"[^>]*Target="([^"]+)"/g)) {
-    const target = match[2].replace(/^\/+/, "");
-    relMap.set(match[1], target.startsWith("xl/") ? target : `xl/${target.replace(/^\.\//, "")}`);
+  for (const match of relsXml.matchAll(/<Relationship[^>]*>/g)) {
+    const node = match[0];
+    const id = node.match(/\bId="([^"]+)"/)?.[1] || "";
+    const targetRaw = node.match(/\bTarget="([^"]+)"/)?.[1] || "";
+    if (!id || !targetRaw) {
+      continue;
+    }
+    const target = targetRaw.replace(/^\/+/, "");
+    relMap.set(id, target.startsWith("xl/") ? target : `xl/${target.replace(/^\.\//, "")}`);
   }
 
   return Array.from(workbookXml.matchAll(/<sheet[^>]*name="([^"]+)"[^>]*r:id="([^"]+)"/g)).map((match) => ({
@@ -344,13 +350,13 @@ function toPriorityScore(value) {
   if (Number.isFinite(numeric)) {
     return numeric;
   }
-  if (/高|核心|重要|优先|推荐|recommended/i.test(text)) {
+  if (/濡ゅ倹顬嗛柡宥囶焾缁虹窏闂佹彃绉烽々顩㈠ù鍏济崢娉戦柟鎭掑姀瀹曟recommended/i.test(text)) {
     return 3;
   }
-  if (/中|一般|normal/i.test(text)) {
+  if (/濞戞挾鎼☉鎾亾闁煎摜鎲ormal/i.test(text)) {
     return 2;
   }
-  if (/低|备选|low/i.test(text)) {
+  if (/濞达絽钘╁璺烘喘閳ь剙顣痩ow/i.test(text)) {
     return 1;
   }
   return 0;
@@ -358,10 +364,29 @@ function toPriorityScore(value) {
 
 function inferConnectorIdFromHint(hint) {
   const blob = normalizeText([hint.name, hint.domain, hint.url, hint.category, ...(hint.tags || [])].join(" "));
-  if (/douyin\.com|iesdouyin\.com|抖音/.test(blob)) return "douyin";
-  if (/bilibili\.com|bilibili|哔哩/.test(blob)) return "bilibili";
+  if (/xinhuanet\.com|news\.cn|xinhua/.test(blob)) return "xinhua";
+  if (/people\.com\.cn|people\.cn|people/.test(blob)) return "people";
+  if (/news\.cctv\.com|cctv\.com|cctv news/.test(blob)) return "cctv_news";
+  if (/thepaper\.cn|the paper/.test(blob)) return "the_paper";
+  if (/caixin\.com|caixin/.test(blob)) return "caixin";
+  if (/jiemian\.com|jiemian/.test(blob)) return "jiemian";
+  if (/reuters\.com|reuters/.test(blob)) return "reuters";
+  if (/apnews\.com|associated press|ap news/.test(blob)) return "ap_news";
+  if (/bbc\.com|bbc\.co\.uk|\bbbc\b/.test(blob)) return "bbc_news";
+  if (/bloomberg\.com|bloomberg/.test(blob)) return "bloomberg";
+  if (/nytimes\.com|new york times|\bnyt\b/.test(blob)) return "nytimes";
+  if (/wsj\.com|wall street journal|\bwsj\b/.test(blob)) return "wsj";
+  if (/planetebook\.com|planet ebook/.test(blob)) return "planetebook";
+  if (/google\.com|blog\.google|developers\.google\.com|ai\.google\.dev|cloud\.google\.com|support\.google\.com|research\.google|google/.test(blob)) return "google";
+  if (/github\.com|github/.test(blob)) return "github";
+  if (/reddit\.com|reddit/.test(blob)) return "reddit";
+  if (/wikipedia\.org|wikipedia/.test(blob)) return "wikipedia";
+  if (/zhihu\.com|zhihu/.test(blob)) return "zhihu";
+  if (/stackoverflow\.com|stack overflow/.test(blob)) return "stack_overflow";
+  if (/douyin\.com|iesdouyin\.com|douyin/.test(blob)) return "douyin";
+  if (/bilibili\.com|bilibili/.test(blob)) return "bilibili";
   if (/segmentfault\.com|segmentfault/.test(blob)) return "segmentfault";
-  if (/ithome\.com|it之家|ithome/.test(blob)) return "ithome";
+  if (/ithome\.com|ithome/.test(blob)) return "ithome";
   if (/arxiv\.org|arxiv/.test(blob)) return "arxiv";
   if (/ted\.com|ted\b/.test(blob)) return "ted";
   if (/news\.ycombinator\.com|hacker news|\bhn\b/.test(blob)) return "hacker_news";
@@ -383,8 +408,8 @@ function normalizeProfile(record, context = {}) {
   const category = String(matchValue(HEADER_PATTERNS.category) || "").trim();
   const tagText = String(matchValue(HEADER_PATTERNS.tags) || "").trim();
   const tags = Array.from(new Set([
-    ...tagText.split(/[;,，、|]/).map((item) => item.trim()).filter(Boolean),
-    ...values.slice(1, 4).flatMap((item) => String(item || "").split(/[;,，、|]/).map((part) => part.trim()).filter(Boolean))
+    ...tagText.split(/[;,闁挎稑琚埀顑跨盃]/).map((item) => item.trim()).filter(Boolean),
+    ...values.slice(1, 4).flatMap((item) => String(item || "").split(/[;,闁挎稑琚埀顑跨盃]/).map((part) => part.trim()).filter(Boolean))
   ])).slice(0, 8);
   const priority = toPriorityScore(matchValue(HEADER_PATTERNS.priority));
 
@@ -513,15 +538,15 @@ function scoreSiteHint(question, hint) {
     }
   }
 
-  if (/视频|直播|采访|演讲|发布会|video|talk|interview/i.test(question) && /video|talk|直播|视频|短视频|采访/.test(blob)) {
+  if (/video|talk|interview|speech|lecture/i.test(question) && /video|talk|interview|speech|lecture|livestream/.test(blob)) {
     score += 1.5;
     matched = true;
   }
-  if (/论文|研究|paper|research/i.test(question) && /paper|research|论文|研究/.test(blob)) {
+  if (/paper|research|study|journal/i.test(question) && /paper|research|study|journal|preprint/.test(blob)) {
     score += 1.5;
     matched = true;
   }
-  if (/新闻|最新|动态|update|news|official/i.test(question) && /news|official|官网|新闻|资讯/.test(blob)) {
+  if (/news|latest|update|official|announcement/i.test(question) && /news|official|announcement|press|update/.test(blob)) {
     score += 1.5;
     matched = true;
   }

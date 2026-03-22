@@ -696,7 +696,7 @@ async function checkHealth() {
 
 async function runResearch() {
   const question = document.getElementById("questionInput").value.trim();
-  const mode = document.querySelector("input[name='mode']:checked").value;
+  const mode = "deep";
 
   if (!question) {
     document.getElementById("finalAnswer").className = "answer-card empty-state";

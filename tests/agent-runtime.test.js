@@ -17,7 +17,11 @@ test("agent runtime should track task lifecycle, inbox, and outbox", () => {
     agentId: "long_text_collector",
     taskType: "collect_long_text",
     input: { source_id: "source-1" },
-    metadata: { connector: "bing_web" }
+    metadata: { connector: "bing_web" },
+    priority: "high",
+    attempt: 2,
+    budgetTag: "research_round",
+    timeoutMs: 12000
   });
 
   assert.equal(runtime.agents.long_text_collector.status, "running");
@@ -29,6 +33,10 @@ test("agent runtime should track task lifecycle, inbox, and outbox", () => {
   assert.equal(runtime.agents.long_text_collector.status, "completed");
   assert.equal(runtime.agents.long_text_collector.completed_tasks, 1);
   assert.equal(runtime.tasks[0].status, "completed");
+  assert.equal(runtime.tasks[0].priority, "high");
+  assert.equal(runtime.tasks[0].attempt, 2);
+  assert.equal(runtime.tasks[0].budget_tag, "research_round");
+  assert.equal(runtime.tasks[0].timeout_ms, 12000);
   assert.equal(runtime.messages.length, 2);
 });
 
